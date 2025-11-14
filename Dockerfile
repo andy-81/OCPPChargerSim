@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /app
 
 COPY OCPPChargerSim/OCPPChargerSim.csproj OCPPChargerSim/
@@ -7,7 +7,7 @@ RUN dotnet restore OCPPChargerSim/OCPPChargerSim.csproj
 COPY . .
 RUN dotnet publish OCPPChargerSim/OCPPChargerSim.csproj -c Release -o /app/out
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
 
 COPY --from=build /app/out ./
