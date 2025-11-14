@@ -9,8 +9,11 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using MQTTnet;
 using MQTTnet.Client;
+using MQTTnet.Client.Disconnecting;
+using MQTTnet.Client.Options;
+using MQTTnet.Client.Publishing;
+using MQTTnet.Client.Subscribing;
 using MQTTnet.Protocol;
 using OcppSimulator;
 
@@ -25,15 +28,15 @@ public sealed class MqttIntegrationService : BackgroundService
     private readonly Channel<bool> _configurationChanges = Channel.CreateUnbounded<bool>();
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
     private readonly SemaphoreSlim _publishLock = new(1, 1);
-    private readonly MqttFactory _mqttFactory = new();
+    private readonly IMqttClientFactory _mqttFactory = new MqttClientFactory();
     private readonly JsonSerializerOptions _serializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
-    private readonly Func<MqttApplicationMessageReceivedEventArgs, Task> _messageHandler;
-    private readonly Func<MqttClientConnectedEventArgs, Task> _connectedHandler;
-    private readonly Func<MqttClientDisconnectedEventArgs, Task> _disconnectedHandler;
+    private readonly Func<MqttApplicationMessageReceivedEventArgs, CancellationToken, Task> _messageHandler;
+    private readonly Func<MqttClientConnectedEventArgs, CancellationToken, Task> _connectedHandler;
+    private readonly Func<MqttClientDisconnectedEventArgs, CancellationToken, Task> _disconnectedHandler;
     private static readonly string[] NumericPayloadPropertyCandidates = new[]
     {
         "value",
@@ -252,7 +255,7 @@ public sealed class MqttIntegrationService : BackgroundService
         {
             if (client.IsConnected)
             {
-                await client.DisconnectAsync().ConfigureAwait(false);
+                await client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -270,7 +273,7 @@ public sealed class MqttIntegrationService : BackgroundService
         _connectedSettings = null;
     }
 
-    private Task OnClientConnectedAsync(MqttClientConnectedEventArgs _)
+    private Task OnClientConnectedAsync(MqttClientConnectedEventArgs _, CancellationToken _)
     {
         var settings = _connectedSettings;
         var client = _client;
@@ -301,11 +304,13 @@ public sealed class MqttIntegrationService : BackgroundService
             {
                 try
                 {
-                    await client.SubscribeAsync(
-                        new MqttTopicFilterBuilder()
+                    var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
+                        .WithTopicFilter(f => f
                             .WithTopic(topic)
-                            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                            .Build()).ConfigureAwait(false);
+                            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce))
+                        .Build();
+
+                    await client.SubscribeAsync(subscribeOptions, CancellationToken.None).ConfigureAwait(false);
                     _logger.LogInformation("Subscribed to MQTT topic {Topic}", topic);
                 }
                 catch (Exception ex)
@@ -319,7 +324,7 @@ public sealed class MqttIntegrationService : BackgroundService
         return Task.CompletedTask;
     }
 
-    private Task OnClientDisconnectedAsync(MqttClientDisconnectedEventArgs args)
+    private Task OnClientDisconnectedAsync(MqttClientDisconnectedEventArgs args, CancellationToken _)
     {
         if (_isStopping)
         {
@@ -363,7 +368,7 @@ public sealed class MqttIntegrationService : BackgroundService
         return Task.CompletedTask;
     }
 
-    private async Task OnApplicationMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
+    private async Task OnApplicationMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args, CancellationToken _)
     {
         var settings = _connectedSettings;
         if (!settings.HasValue)
@@ -372,16 +377,16 @@ public sealed class MqttIntegrationService : BackgroundService
         }
 
         var topic = args.ApplicationMessage.Topic;
-        var payloadSegment = args.ApplicationMessage.PayloadSegment;
-        if (payloadSegment.IsEmpty)
+        var payload = args.ApplicationMessage.Payload;
+        if (payload.IsEmpty)
         {
             return;
         }
 
-        string payload;
+        string payloadText;
         try
         {
-            payload = Encoding.UTF8.GetString(payloadSegment);
+            payloadText = Encoding.UTF8.GetString(payload.Span);
         }
         catch (Exception ex)
         {
@@ -392,21 +397,21 @@ public sealed class MqttIntegrationService : BackgroundService
         if (!string.IsNullOrWhiteSpace(settings.Value.StatusTopic) &&
             string.Equals(topic, settings.Value.StatusTopic, StringComparison.Ordinal))
         {
-            await HandleInboundStatusAsync(payload).ConfigureAwait(false);
+            await HandleInboundStatusAsync(payloadText).ConfigureAwait(false);
             return;
         }
 
         if (!string.IsNullOrWhiteSpace(settings.Value.MeterTopic) &&
             string.Equals(topic, settings.Value.MeterTopic, StringComparison.Ordinal))
         {
-            HandleInboundMeter(payload);
+            HandleInboundMeter(payloadText);
             return;
         }
 
         if (!string.IsNullOrWhiteSpace(settings.Value.CurrentTopic) &&
             string.Equals(topic, settings.Value.CurrentTopic, StringComparison.Ordinal))
         {
-            HandleInboundCurrent(payload);
+            HandleInboundCurrent(payloadText);
         }
     }
 
@@ -715,7 +720,7 @@ public sealed class MqttIntegrationService : BackgroundService
             return;
         }
 
-        var message = new MqttApplicationMessageBuilder()
+        var message = new MqttClientPublishOptionsBuilder()
             .WithTopic(topic)
             .WithPayload(json)
             .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)

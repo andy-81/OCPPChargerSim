@@ -7,7 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MQTTnet" Version="4.3.9" />
+    <PackageReference Include="MQTTnet" Version="5.0.2" />
+    <PackageReference Include="MQTTnet.Client" Version="5.0.2" />
     <Content Update="chargers.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
