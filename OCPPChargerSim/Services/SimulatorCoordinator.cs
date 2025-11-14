@@ -14,6 +14,8 @@ public sealed class SimulatorCoordinator
     private ChargerClient? _client;
     private DualLogger? _dualLogger;
 
+    public event Action<ChargerClient>? ClientAttached;
+
     public SimulatorCoordinator(SimulatorState state, ILogger<SimulatorCoordinator> logger)
     {
         _state = state;
@@ -39,6 +41,8 @@ public sealed class SimulatorCoordinator
             _client = client;
             _dualLogger = logger;
         }
+
+        ClientAttached?.Invoke(client);
     }
 
     public ChargerClient? GetClient()

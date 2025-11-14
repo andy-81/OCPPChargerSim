@@ -24,6 +24,7 @@ builder.Services.AddSingleton<SimulatorState>();
 builder.Services.AddSingleton<SimulatorCoordinator>();
 builder.Services.AddSingleton(sp => new SimulatorConfigurationProvider(builder.Configuration, storageOptions.DataDirectory, chargerCatalog));
 builder.Services.AddHostedService<SimulatorHostedService>();
+builder.Services.AddHostedService<MqttIntegrationService>();
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -141,6 +142,7 @@ app.MapGet("/api/state", (SimulatorState state, SimulatorConfigurationProvider c
     var (url, identity, authKey) = state.GetConnectionDetails();
     var (requiresConfiguration, configFileMissing) = state.ConfigurationStatus;
     var (chargePointSerial, chargeBoxSerial) = state.GetSerialNumbers();
+    var mqtt = state.GetMqttConfiguration();
     return Results.Ok(new
     {
         vehicleState = state.VehicleState,
@@ -155,6 +157,16 @@ app.MapGet("/api/state", (SimulatorState state, SimulatorConfigurationProvider c
             timestamp = sample.Timestamp,
         },
         connection = new { url, identity, authKey },
+        mqtt = new
+        {
+            enabled = mqtt.Enabled,
+            host = mqtt.Host,
+            port = mqtt.Port,
+            username = mqtt.Username,
+            password = mqtt.Password,
+            statusTopic = mqtt.StatusTopic,
+            publishTopic = mqtt.PublishTopic,
+        },
         loggingEnabled = state.LoggingEnabled,
         requiresConfiguration,
         configurationFileMissing = configFileMissing,
@@ -183,6 +195,29 @@ app.MapPost("/api/bootstrap", async (BootstrapRequest request, SimulatorConfigur
         return Results.BadRequest(new { error = "Please select a valid charger type." });
     }
 
+    if (request.EnableMqtt)
+    {
+        if (string.IsNullOrWhiteSpace(request.MqttHost))
+        {
+            return Results.BadRequest(new { error = "Please provide an MQTT host when MQTT integration is enabled." });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.MqttPublishTopic))
+        {
+            return Results.BadRequest(new { error = "Please provide an MQTT publish topic when MQTT integration is enabled." });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.MqttStatusTopic))
+        {
+            return Results.BadRequest(new { error = "Please provide an MQTT status topic when MQTT integration is enabled." });
+        }
+
+        if (request.MqttPort.HasValue && (request.MqttPort.Value <= 0 || request.MqttPort.Value > 65535))
+        {
+            return Results.BadRequest(new { error = "MQTT port must be between 1 and 65535." });
+        }
+    }
+
     var cpSerial = string.IsNullOrWhiteSpace(request.ChargePointSerialNumber) ? "0" : request.ChargePointSerialNumber.Trim();
     var cbSerial = string.IsNullOrWhiteSpace(request.ChargeBoxSerialNumber) ? "0" : request.ChargeBoxSerialNumber.Trim();
 
@@ -194,12 +229,27 @@ app.MapPost("/api/bootstrap", async (BootstrapRequest request, SimulatorConfigur
         ChargerId = request.ChargerId,
         ChargePointSerialNumber = cpSerial,
         ChargeBoxSerialNumber = cbSerial,
+        EnableMqtt = request.EnableMqtt,
+        MqttHost = request.MqttHost,
+        MqttPort = request.MqttPort,
+        MqttUsername = request.MqttUsername,
+        MqttPassword = request.MqttPassword,
+        MqttStatusTopic = request.MqttStatusTopic,
+        MqttPublishTopic = request.MqttPublishTopic,
     }, cancellationToken).ConfigureAwait(false);
 
     state.SetConfigurationRequirement(snapshot.RequiresConfiguration, snapshot.ConfigurationFileMissing);
     state.SetConnectionDetails(snapshot.Options.Url ?? "—", snapshot.Options.Identity ?? "—", snapshot.Options.AuthKey ?? "—");
     state.SetSelectedCharger(snapshot.Options.ChargerId);
     state.SetSerialNumbers(snapshot.Options.ChargePointSerialNumber ?? "0", snapshot.Options.ChargeBoxSerialNumber ?? "0");
+    state.SetMqttConfiguration(
+        snapshot.Options.EnableMqtt,
+        snapshot.Options.MqttHost,
+        snapshot.Options.MqttPort,
+        snapshot.Options.MqttUsername,
+        snapshot.Options.MqttPassword,
+        snapshot.Options.MqttStatusTopic,
+        snapshot.Options.MqttPublishTopic);
 
     return Results.Accepted();
 });
@@ -227,4 +277,17 @@ record ConfigurationRequest(string Key, string Value);
 
 record LoggingRequest(bool Enabled);
 
-record BootstrapRequest(string Url, string Identity, string AuthKey, string ChargerId, string ChargePointSerialNumber, string ChargeBoxSerialNumber);
+record BootstrapRequest(
+    string Url,
+    string Identity,
+    string AuthKey,
+    string ChargerId,
+    string ChargePointSerialNumber,
+    string ChargeBoxSerialNumber,
+    bool EnableMqtt,
+    string? MqttHost,
+    int? MqttPort,
+    string? MqttUsername,
+    string? MqttPassword,
+    string? MqttStatusTopic,
+    string? MqttPublishTopic);

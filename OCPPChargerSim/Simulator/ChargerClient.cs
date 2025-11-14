@@ -91,6 +91,7 @@ public sealed class ChargerClient
     public event Action<string>? ConnectorStatusChanged;
     public event Action<string, string>? ConfigurationChanged;
     public event Action<MeterSample>? MeterSampled;
+    public event Action<string>? RemoteCommandIssued;
 
     public string VehicleState => _vehicle.State;
     public string ConnectorStatus { get; private set; } = "Initializing";
@@ -601,6 +602,7 @@ public sealed class ChargerClient
 
         _activeIdTag = idTag;
         StopMeterValueLoop();
+        NotifyRemoteCommand("RemoteStart");
         await BeginChargingSequenceAsync(idTag, payload, uniqueId, StateInitiator.Remote, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1121,6 +1123,7 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
                     ["status"] = "Accepted",
                 }, cancellationToken).ConfigureAwait(false);
 
+                NotifyRemoteCommand("RemoteStop");
                 TransitionVehicleState("Finishing", StateInitiator.Remote);
                 await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
                 await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
@@ -1156,6 +1159,7 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             ["status"] = "Accepted",
         }, cancellationToken).ConfigureAwait(false);
 
+        NotifyRemoteCommand("RemoteStop");
         TransitionVehicleState("Finishing", StateInitiator.Remote);
         await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
 
@@ -1231,6 +1235,24 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             _meterStartValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
             _meterValue = _meterStartValue;
             _lastMeterSampleTimestamp = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private void NotifyRemoteCommand(string command)
+    {
+        var handlers = RemoteCommandIssued;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        try
+        {
+            handlers.Invoke(command);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"Remote command notification failed: {ex}");
         }
     }
 

@@ -140,6 +140,13 @@ public sealed class SimulatorConfigurationProvider
             ["ChargerId"] = normalized.ChargerId,
             ["ChargePointSerialNumber"] = normalized.ChargePointSerialNumber,
             ["ChargeBoxSerialNumber"] = normalized.ChargeBoxSerialNumber,
+            ["EnableMqtt"] = normalized.EnableMqtt,
+            ["MqttHost"] = normalized.MqttHost,
+            ["MqttPort"] = normalized.MqttPort,
+            ["MqttUsername"] = normalized.MqttUsername,
+            ["MqttPassword"] = normalized.MqttPassword,
+            ["MqttStatusTopic"] = normalized.MqttStatusTopic,
+            ["MqttPublishTopic"] = normalized.MqttPublishTopic,
         };
 
         var json = JsonSerializer.Serialize(new Dictionary<string, object?>
@@ -184,6 +191,20 @@ public sealed class SimulatorConfigurationProvider
         var chargePointSerial = string.IsNullOrWhiteSpace(options.ChargePointSerialNumber) ? "0" : options.ChargePointSerialNumber.Trim();
         var chargeBoxSerial = string.IsNullOrWhiteSpace(options.ChargeBoxSerialNumber) ? "0" : options.ChargeBoxSerialNumber.Trim();
 
+        var mqttHost = string.IsNullOrWhiteSpace(options.MqttHost) ? null : options.MqttHost.Trim();
+        var mqttStatusTopic = string.IsNullOrWhiteSpace(options.MqttStatusTopic) ? null : options.MqttStatusTopic.Trim();
+        var mqttPublishTopic = string.IsNullOrWhiteSpace(options.MqttPublishTopic) ? null : options.MqttPublishTopic.Trim();
+        var mqttUsername = string.IsNullOrWhiteSpace(options.MqttUsername) ? null : options.MqttUsername.Trim();
+        var mqttPassword = options.MqttPassword;
+
+        int? mqttPort = null;
+        if (options.MqttPort.HasValue && options.MqttPort.Value > 0 && options.MqttPort.Value <= 65535)
+        {
+            mqttPort = options.MqttPort.Value;
+        }
+
+        var enableMqtt = options.EnableMqtt && mqttHost is not null && mqttPublishTopic is not null && mqttStatusTopic is not null;
+
         return new SimulatorOptions
         {
             Url = string.IsNullOrWhiteSpace(options.Url) ? null : options.Url.Trim(),
@@ -195,6 +216,13 @@ public sealed class SimulatorConfigurationProvider
             ChargerId = chargerId,
             ChargePointSerialNumber = chargePointSerial,
             ChargeBoxSerialNumber = chargeBoxSerial,
+            EnableMqtt = enableMqtt,
+            MqttHost = mqttHost,
+            MqttPort = mqttPort,
+            MqttUsername = mqttUsername,
+            MqttPassword = string.IsNullOrEmpty(mqttPassword) ? null : mqttPassword,
+            MqttStatusTopic = mqttStatusTopic,
+            MqttPublishTopic = mqttPublishTopic,
         };
     }
 
@@ -219,6 +247,13 @@ public sealed class SimulatorConfigurationProvider
             ChargerId = options.ChargerId,
             ChargePointSerialNumber = options.ChargePointSerialNumber,
             ChargeBoxSerialNumber = options.ChargeBoxSerialNumber,
+            EnableMqtt = options.EnableMqtt,
+            MqttHost = options.MqttHost,
+            MqttPort = options.MqttPort,
+            MqttUsername = options.MqttUsername,
+            MqttPassword = options.MqttPassword,
+            MqttStatusTopic = options.MqttStatusTopic,
+            MqttPublishTopic = options.MqttPublishTopic,
         };
     }
 

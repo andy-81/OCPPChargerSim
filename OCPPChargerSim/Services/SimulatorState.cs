@@ -22,6 +22,13 @@ public sealed class SimulatorState
     private string? _selectedChargerId;
     private string _chargePointSerial = "0";
     private string _chargeBoxSerial = "0";
+    private bool _mqttEnabled;
+    private string _mqttHost = string.Empty;
+    private int? _mqttPort;
+    private string _mqttUsername = string.Empty;
+    private string _mqttPassword = string.Empty;
+    private string _mqttStatusTopic = string.Empty;
+    private string _mqttPublishTopic = string.Empty;
 
     public void AddLog(string message)
     {
@@ -182,6 +189,35 @@ public sealed class SimulatorState
         }
     }
 
+    public void SetMqttConfiguration(bool enabled, string? host, int? port, string? username, string? password, string? statusTopic, string? publishTopic)
+    {
+        lock (_sync)
+        {
+            _mqttEnabled = enabled;
+            _mqttHost = host ?? string.Empty;
+            _mqttPort = port;
+            _mqttUsername = username ?? string.Empty;
+            _mqttPassword = password ?? string.Empty;
+            _mqttStatusTopic = statusTopic ?? string.Empty;
+            _mqttPublishTopic = publishTopic ?? string.Empty;
+        }
+    }
+
+    public MqttConfigurationSnapshot GetMqttConfiguration()
+    {
+        lock (_sync)
+        {
+            return new MqttConfigurationSnapshot(
+                _mqttEnabled,
+                string.IsNullOrWhiteSpace(_mqttHost) ? null : _mqttHost,
+                _mqttPort,
+                string.IsNullOrWhiteSpace(_mqttUsername) ? null : _mqttUsername,
+                string.IsNullOrEmpty(_mqttPassword) ? null : _mqttPassword,
+                string.IsNullOrWhiteSpace(_mqttStatusTopic) ? null : _mqttStatusTopic,
+                string.IsNullOrWhiteSpace(_mqttPublishTopic) ? null : _mqttPublishTopic);
+        }
+    }
+
     public void SetConfigurationSnapshot(IReadOnlyDictionary<string, string> snapshot)
     {
         lock (_sync)
@@ -222,3 +258,12 @@ public sealed class SimulatorState
         }
     }
 }
+
+public readonly record struct MqttConfigurationSnapshot(
+    bool Enabled,
+    string? Host,
+    int? Port,
+    string? Username,
+    string? Password,
+    string? StatusTopic,
+    string? PublishTopic);
