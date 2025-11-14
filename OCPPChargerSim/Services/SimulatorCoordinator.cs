@@ -14,6 +14,8 @@ public sealed class SimulatorCoordinator
     private ChargerClient? _client;
     private DualLogger? _dualLogger;
 
+    public event Action<ChargerClient>? ClientAttached;
+
     public SimulatorCoordinator(SimulatorState state, ILogger<SimulatorCoordinator> logger)
     {
         _state = state;
@@ -39,6 +41,8 @@ public sealed class SimulatorCoordinator
             _client = client;
             _dualLogger = logger;
         }
+
+        ClientAttached?.Invoke(client);
     }
 
     public ChargerClient? GetClient()
@@ -92,6 +96,34 @@ public sealed class SimulatorCoordinator
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to set local configuration {Key}", key);
+            throw;
+        }
+    }
+
+    public void UpdateMeterReading(double energyWh)
+    {
+        try
+        {
+            var client = EnsureClient();
+            client.ApplyExternalMeterSample(energyWh, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply external meter reading {EnergyWh}", energyWh);
+            throw;
+        }
+    }
+
+    public void UpdateChargeCurrent(double currentAmps)
+    {
+        try
+        {
+            var client = EnsureClient();
+            client.ApplyExternalMeterSample(null, currentAmps);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply external charge current {Current}", currentAmps);
             throw;
         }
     }

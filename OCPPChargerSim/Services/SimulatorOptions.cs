@@ -19,4 +19,22 @@ public sealed class SimulatorOptions
     public string? ChargePointSerialNumber { get; set; }
 
     public string? ChargeBoxSerialNumber { get; set; }
+
+    public bool EnableMqtt { get; set; }
+
+    public string? MqttHost { get; set; }
+
+    public int? MqttPort { get; set; }
+
+    public string? MqttUsername { get; set; }
+
+    public string? MqttPassword { get; set; }
+
+    public string? MqttStatusTopic { get; set; }
+
+    public string? MqttPublishTopic { get; set; }
+
+    public string? MqttMeterTopic { get; set; }
+
+    public string? MqttCurrentTopic { get; set; }
 }
