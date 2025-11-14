@@ -43,14 +43,16 @@ public sealed class SimulatorHostedService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var snapshot = _configurationProvider.Snapshot;
-            _state.SetMqttConfiguration(
-                snapshot.Options.EnableMqtt,
-                snapshot.Options.MqttHost,
-                snapshot.Options.MqttPort,
-                snapshot.Options.MqttUsername,
-                snapshot.Options.MqttPassword,
-                snapshot.Options.MqttStatusTopic,
-                snapshot.Options.MqttPublishTopic);
+        _state.SetMqttConfiguration(
+            snapshot.Options.EnableMqtt,
+            snapshot.Options.MqttHost,
+            snapshot.Options.MqttPort,
+            snapshot.Options.MqttUsername,
+            snapshot.Options.MqttPassword,
+            snapshot.Options.MqttStatusTopic,
+            snapshot.Options.MqttPublishTopic,
+            snapshot.Options.MqttMeterTopic,
+            snapshot.Options.MqttCurrentTopic);
             _state.SetConfigurationRequirement(snapshot.RequiresConfiguration, snapshot.ConfigurationFileMissing);
             _state.SetSelectedCharger(_catalog.TryGet(snapshot.Options.ChargerId, out _) ? snapshot.Options.ChargerId : null);
             _state.SetSerialNumbers(snapshot.Options.ChargePointSerialNumber ?? "0", snapshot.Options.ChargeBoxSerialNumber ?? "0");
@@ -67,7 +69,9 @@ public sealed class SimulatorHostedService : BackgroundService
                         snapshot.Options.MqttUsername,
                         snapshot.Options.MqttPassword,
                         snapshot.Options.MqttStatusTopic,
-                        snapshot.Options.MqttPublishTopic);
+                        snapshot.Options.MqttPublishTopic,
+                        snapshot.Options.MqttMeterTopic,
+                        snapshot.Options.MqttCurrentTopic);
                     _state.SetConfigurationRequirement(snapshot.RequiresConfiguration, snapshot.ConfigurationFileMissing);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

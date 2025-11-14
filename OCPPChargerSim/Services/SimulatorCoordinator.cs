@@ -100,6 +100,34 @@ public sealed class SimulatorCoordinator
         }
     }
 
+    public void UpdateMeterReading(double energyWh)
+    {
+        try
+        {
+            var client = EnsureClient();
+            client.ApplyExternalMeterSample(energyWh, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply external meter reading {EnergyWh}", energyWh);
+            throw;
+        }
+    }
+
+    public void UpdateChargeCurrent(double currentAmps)
+    {
+        try
+        {
+            var client = EnsureClient();
+            client.ApplyExternalMeterSample(null, currentAmps);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply external charge current {Current}", currentAmps);
+            throw;
+        }
+    }
+
     public async Task SendHeartbeatAsync(CancellationToken cancellationToken)
     {
         try

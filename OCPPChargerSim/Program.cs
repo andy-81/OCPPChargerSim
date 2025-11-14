@@ -166,6 +166,8 @@ app.MapGet("/api/state", (SimulatorState state, SimulatorConfigurationProvider c
             password = mqtt.Password,
             statusTopic = mqtt.StatusTopic,
             publishTopic = mqtt.PublishTopic,
+            meterTopic = mqtt.MeterTopic,
+            currentTopic = mqtt.CurrentTopic,
         },
         loggingEnabled = state.LoggingEnabled,
         requiresConfiguration,
@@ -236,6 +238,8 @@ app.MapPost("/api/bootstrap", async (BootstrapRequest request, SimulatorConfigur
         MqttPassword = request.MqttPassword,
         MqttStatusTopic = request.MqttStatusTopic,
         MqttPublishTopic = request.MqttPublishTopic,
+        MqttMeterTopic = request.MqttMeterTopic,
+        MqttCurrentTopic = request.MqttCurrentTopic,
     }, cancellationToken).ConfigureAwait(false);
 
     state.SetConfigurationRequirement(snapshot.RequiresConfiguration, snapshot.ConfigurationFileMissing);
@@ -249,7 +253,9 @@ app.MapPost("/api/bootstrap", async (BootstrapRequest request, SimulatorConfigur
         snapshot.Options.MqttUsername,
         snapshot.Options.MqttPassword,
         snapshot.Options.MqttStatusTopic,
-        snapshot.Options.MqttPublishTopic);
+        snapshot.Options.MqttPublishTopic,
+        snapshot.Options.MqttMeterTopic,
+        snapshot.Options.MqttCurrentTopic);
 
     return Results.Accepted();
 });
@@ -290,4 +296,6 @@ record BootstrapRequest(
     string? MqttUsername,
     string? MqttPassword,
     string? MqttStatusTopic,
-    string? MqttPublishTopic);
+    string? MqttPublishTopic,
+    string? MqttMeterTopic,
+    string? MqttCurrentTopic);

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -32,6 +34,15 @@ public sealed class MqttIntegrationService : BackgroundService
     private readonly Func<MqttApplicationMessageReceivedEventArgs, Task> _messageHandler;
     private readonly Func<MqttClientConnectedEventArgs, Task> _connectedHandler;
     private readonly Func<MqttClientDisconnectedEventArgs, Task> _disconnectedHandler;
+    private static readonly string[] NumericPayloadPropertyCandidates = new[]
+    {
+        "value",
+        "reading",
+        "energy",
+        "energyWh",
+        "current",
+        "amps",
+    };
 
     private IDisposable? _configurationSubscription;
     private IMqttClient? _client;
@@ -268,8 +279,23 @@ public sealed class MqttIntegrationService : BackgroundService
             return Task.CompletedTask;
         }
 
-        var topic = settings.Value.StatusTopic;
-        if (!string.IsNullOrWhiteSpace(topic))
+        var topics = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(settings.Value.StatusTopic))
+        {
+            topics.Add(settings.Value.StatusTopic!);
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.Value.MeterTopic))
+        {
+            topics.Add(settings.Value.MeterTopic!);
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.Value.CurrentTopic))
+        {
+            topics.Add(settings.Value.CurrentTopic!);
+        }
+
+        foreach (var topic in topics)
         {
             _ = Task.Run(async () =>
             {
@@ -340,16 +366,12 @@ public sealed class MqttIntegrationService : BackgroundService
     private async Task OnApplicationMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs args)
     {
         var settings = _connectedSettings;
-        if (!settings.HasValue || string.IsNullOrWhiteSpace(settings.Value.StatusTopic))
+        if (!settings.HasValue)
         {
             return;
         }
 
-        if (!string.Equals(args.ApplicationMessage.Topic, settings.Value.StatusTopic, StringComparison.Ordinal))
-        {
-            return;
-        }
-
+        var topic = args.ApplicationMessage.Topic;
         var payloadSegment = args.ApplicationMessage.PayloadSegment;
         if (payloadSegment.IsEmpty)
         {
@@ -367,7 +389,25 @@ public sealed class MqttIntegrationService : BackgroundService
             return;
         }
 
-        await HandleInboundStatusAsync(payload).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(settings.Value.StatusTopic) &&
+            string.Equals(topic, settings.Value.StatusTopic, StringComparison.Ordinal))
+        {
+            await HandleInboundStatusAsync(payload).ConfigureAwait(false);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.Value.MeterTopic) &&
+            string.Equals(topic, settings.Value.MeterTopic, StringComparison.Ordinal))
+        {
+            HandleInboundMeter(payload);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.Value.CurrentTopic) &&
+            string.Equals(topic, settings.Value.CurrentTopic, StringComparison.Ordinal))
+        {
+            HandleInboundCurrent(payload);
+        }
     }
 
     private async Task HandleInboundStatusAsync(string payload)
@@ -427,6 +467,62 @@ public sealed class MqttIntegrationService : BackgroundService
         }
     }
 
+    private void HandleInboundMeter(string payload)
+    {
+        if (!TryParseNumericPayload(payload, out var reading))
+        {
+            _logger.LogWarning("MQTT meter payload could not be parsed: {Payload}", payload);
+            return;
+        }
+
+        if (reading < 0)
+        {
+            _logger.LogWarning("Ignoring negative meter reading from MQTT payload: {Payload}", payload);
+            return;
+        }
+
+        try
+        {
+            _coordinator.UpdateMeterReading(reading);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Simulator not ready to accept MQTT meter reading {Reading}", reading);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply MQTT meter reading {Reading}", reading);
+        }
+    }
+
+    private void HandleInboundCurrent(string payload)
+    {
+        if (!TryParseNumericPayload(payload, out var amps))
+        {
+            _logger.LogWarning("MQTT current payload could not be parsed: {Payload}", payload);
+            return;
+        }
+
+        if (amps < 0)
+        {
+            _logger.LogWarning("Ignoring negative charge current from MQTT payload: {Payload}", payload);
+            return;
+        }
+
+        try
+        {
+            _coordinator.UpdateChargeCurrent(amps);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Simulator not ready to accept MQTT current {Current}", amps);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to apply MQTT current {Current}", amps);
+        }
+    }
+
     private void OnClientAttached(ChargerClient client)
     {
         lock (_clientEventSync)
@@ -471,6 +567,88 @@ public sealed class MqttIntegrationService : BackgroundService
         var sample = _state.LatestSample;
         var state = _state.VehicleState;
         return PublishStatusUpdateAsync(state, sample, _publishToken);
+    }
+
+    private static bool TryParseNumericPayload(string payload, out double value)
+    {
+        value = 0d;
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            if (TryExtractNumeric(document.RootElement, out value))
+            {
+                return true;
+            }
+        }
+        catch (JsonException)
+        {
+            // fall back to plain parsing
+        }
+        catch
+        {
+            return false;
+        }
+
+        return double.TryParse(payload.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryExtractNumeric(JsonElement element, out double value)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Number when element.TryGetDouble(out var number):
+                value = number;
+                return true;
+            case JsonValueKind.String:
+            {
+                var text = element.GetString();
+                if (!string.IsNullOrWhiteSpace(text) &&
+                    double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                {
+                    value = parsed;
+                    return true;
+                }
+
+                break;
+            }
+            case JsonValueKind.Object:
+            {
+                foreach (var candidate in NumericPayloadPropertyCandidates)
+                {
+                    if (!element.TryGetProperty(candidate, out var property))
+                    {
+                        continue;
+                    }
+
+                    if (property.ValueKind == JsonValueKind.Number && property.TryGetDouble(out var nestedNumber))
+                    {
+                        value = nestedNumber;
+                        return true;
+                    }
+
+                    if (property.ValueKind == JsonValueKind.String)
+                    {
+                        var text = property.GetString();
+                        if (!string.IsNullOrWhiteSpace(text) &&
+                            double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var nestedParsed))
+                        {
+                            value = nestedParsed;
+                            return true;
+                        }
+                    }
+                }
+
+                break;
+            }
+        }
+
+        value = 0d;
+        return false;
     }
 
     private Task PublishStatusUpdateAsync(string state, MeterSample sample, CancellationToken cancellationToken)
@@ -570,6 +748,8 @@ public sealed class MqttIntegrationService : BackgroundService
         var host = string.IsNullOrWhiteSpace(options.MqttHost) ? null : options.MqttHost.Trim();
         var publishTopic = string.IsNullOrWhiteSpace(options.MqttPublishTopic) ? null : options.MqttPublishTopic.Trim();
         var statusTopic = string.IsNullOrWhiteSpace(options.MqttStatusTopic) ? null : options.MqttStatusTopic.Trim();
+        var meterTopic = string.IsNullOrWhiteSpace(options.MqttMeterTopic) ? null : options.MqttMeterTopic.Trim();
+        var currentTopic = string.IsNullOrWhiteSpace(options.MqttCurrentTopic) ? null : options.MqttCurrentTopic.Trim();
         var username = string.IsNullOrWhiteSpace(options.MqttUsername) ? null : options.MqttUsername.Trim();
         var password = options.MqttPassword;
 
@@ -581,7 +761,7 @@ public sealed class MqttIntegrationService : BackgroundService
 
         var enabled = options.EnableMqtt && host is not null && publishTopic is not null && statusTopic is not null;
 
-        return new MqttSettings(enabled, host, port, username, password, statusTopic, publishTopic);
+        return new MqttSettings(enabled, host, port, username, password, statusTopic, publishTopic, meterTopic, currentTopic);
     }
 
     private readonly record struct MqttSettings(
@@ -591,5 +771,7 @@ public sealed class MqttIntegrationService : BackgroundService
         string? Username,
         string? Password,
         string? StatusTopic,
-        string? PublishTopic);
+        string? PublishTopic,
+        string? MeterTopic,
+        string? CurrentTopic);
 }

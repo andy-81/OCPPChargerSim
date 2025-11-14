@@ -69,6 +69,7 @@ public sealed class ChargerClient
     private CancellationTokenSource? _manualSimulationCts;
     private CancellationTokenSource? _heartbeatLoopCts;
     private readonly object _manualLock = new();
+    private readonly object _meterUpdateLock = new();
     private bool _manualSimulationActive;
     private readonly bool _supportSoC;
     private readonly bool _heartbeatEnabled;
@@ -129,6 +130,71 @@ public sealed class ChargerClient
         }
 
         ConfigurationChanged?.Invoke(key, value);
+    }
+
+    public void ApplyExternalMeterSample(double? energyWh, double? currentAmps)
+    {
+        if (!energyWh.HasValue && !currentAmps.HasValue)
+        {
+            return;
+        }
+
+        double? sanitizedEnergy = null;
+        if (energyWh.HasValue && !double.IsNaN(energyWh.Value) && !double.IsInfinity(energyWh.Value) && energyWh.Value >= 0)
+        {
+            sanitizedEnergy = energyWh.Value;
+        }
+
+        double? sanitizedCurrent = null;
+        if (currentAmps.HasValue && !double.IsNaN(currentAmps.Value) && !double.IsInfinity(currentAmps.Value) && currentAmps.Value >= 0)
+        {
+            sanitizedCurrent = currentAmps.Value;
+        }
+
+        if (!sanitizedEnergy.HasValue && !sanitizedCurrent.HasValue)
+        {
+            return;
+        }
+
+        MeterSample sample;
+        lock (_meterUpdateLock)
+        {
+            var baseline = LatestSample;
+            var timestamp = DateTimeOffset.UtcNow;
+
+            var energyValue = sanitizedEnergy ?? baseline.EnergyWh;
+            if (sanitizedEnergy.HasValue)
+            {
+                _meterAccumulatorWh = sanitizedEnergy.Value;
+                _meterValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
+                if (_activeTransactionId.HasValue)
+                {
+                    _meterStartValue = Math.Min(_meterStartValue, _meterValue);
+                }
+                else
+                {
+                    _meterStartValue = _meterValue;
+                }
+
+                PersistMeterAccumulator();
+            }
+
+            var currentValue = sanitizedCurrent ?? baseline.CurrentAmps;
+            var powerValue = sanitizedCurrent.HasValue
+                ? Math.Min(sanitizedCurrent.Value * NominalVoltage / 1000.0, MaxPowerKw)
+                : baseline.PowerKw;
+
+            var socValue = baseline.StateOfCharge;
+            if (socValue < 0 && _supportSoC)
+            {
+                socValue = FixedStateOfCharge;
+            }
+
+            _lastMeterSampleTimestamp = timestamp;
+            sample = new MeterSample(energyValue, powerValue, currentValue, socValue, timestamp);
+        }
+
+        PublishSample(sample);
     }
 
     public Task SendManualStatusAsync(string status, CancellationToken cancellationToken)
@@ -654,10 +720,13 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         var uniqueId = GenerateUniqueId();
         var tcs = RegisterCall(uniqueId);
 
-        _meterStartValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
-        _meterValue = _meterStartValue;
-        _lastMeterSampleTimestamp = DateTimeOffset.UtcNow;
-        PersistMeterAccumulator();
+        lock (_meterUpdateLock)
+        {
+            _meterStartValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
+            _meterValue = _meterStartValue;
+            _lastMeterSampleTimestamp = DateTimeOffset.UtcNow;
+            PersistMeterAccumulator();
+        }
 
         var request = new Dictionary<string, object>
         {
@@ -867,21 +936,31 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             }
         }
 
-        _lastMeterSampleTimestamp = now;
-
-        var jitter = (_random.NextDouble() - 0.5) * CurrentJitterAmps;
-        var currentAmps = Math.Clamp(TargetCurrentAmps + jitter, 10.0, MaxCurrentAmps);
-        if (GetConfiguredCurrentLimit() is double configuredLimit)
-        {
-            currentAmps = Math.Min(currentAmps, configuredLimit);
-        }
-        var powerKwValue = Math.Min(currentAmps * NominalVoltage / 1000.0, MaxPowerKw);
-
-        var incrementWh = powerKwValue * elapsedSeconds / 3.6;
-        _meterAccumulatorWh += incrementWh;
-        _meterValue = (int)Math.Round(_meterAccumulatorWh);
-        var energyWhValue = Math.Round(_meterAccumulatorWh, 0, MidpointRounding.AwayFromZero);
+        double currentAmps;
+        double powerKwValue;
+        double energyWhValue;
+        double meterAccumulatorSnapshot;
         var socValue = FixedStateOfCharge;
+
+        lock (_meterUpdateLock)
+        {
+            _lastMeterSampleTimestamp = now;
+
+            var jitter = (_random.NextDouble() - 0.5) * CurrentJitterAmps;
+            currentAmps = Math.Clamp(TargetCurrentAmps + jitter, 10.0, MaxCurrentAmps);
+            if (GetConfiguredCurrentLimit() is double configuredLimit)
+            {
+                currentAmps = Math.Min(currentAmps, configuredLimit);
+            }
+
+            powerKwValue = Math.Min(currentAmps * NominalVoltage / 1000.0, MaxPowerKw);
+
+            var incrementWh = powerKwValue * elapsedSeconds / 3.6;
+            _meterAccumulatorWh += incrementWh;
+            _meterValue = (int)Math.Round(_meterAccumulatorWh);
+            meterAccumulatorSnapshot = _meterAccumulatorWh;
+            energyWhValue = Math.Round(_meterAccumulatorWh, 0, MidpointRounding.AwayFromZero);
+        }
         var energy = energyWhValue.ToString(CultureInfo.InvariantCulture);
         var power = powerKwValue.ToString("0.0", CultureInfo.InvariantCulture);
         string? soc = null;
@@ -956,7 +1035,7 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             _pendingCalls.TryRemove(uniqueId, out _);
         }
 
-        PublishSample(new MeterSample(_meterAccumulatorWh, powerKwValue, currentAmps, _supportSoC ? socValue : -1, DateTimeOffset.UtcNow));
+        PublishSample(new MeterSample(meterAccumulatorSnapshot, powerKwValue, currentAmps, _supportSoC ? socValue : -1, DateTimeOffset.UtcNow));
         PersistMeterAccumulator();
     }
 

@@ -147,6 +147,8 @@ public sealed class SimulatorConfigurationProvider
             ["MqttPassword"] = normalized.MqttPassword,
             ["MqttStatusTopic"] = normalized.MqttStatusTopic,
             ["MqttPublishTopic"] = normalized.MqttPublishTopic,
+            ["MqttMeterTopic"] = normalized.MqttMeterTopic,
+            ["MqttCurrentTopic"] = normalized.MqttCurrentTopic,
         };
 
         var json = JsonSerializer.Serialize(new Dictionary<string, object?>
@@ -196,6 +198,8 @@ public sealed class SimulatorConfigurationProvider
         var mqttPublishTopic = string.IsNullOrWhiteSpace(options.MqttPublishTopic) ? null : options.MqttPublishTopic.Trim();
         var mqttUsername = string.IsNullOrWhiteSpace(options.MqttUsername) ? null : options.MqttUsername.Trim();
         var mqttPassword = options.MqttPassword;
+        var mqttMeterTopic = string.IsNullOrWhiteSpace(options.MqttMeterTopic) ? null : options.MqttMeterTopic.Trim();
+        var mqttCurrentTopic = string.IsNullOrWhiteSpace(options.MqttCurrentTopic) ? null : options.MqttCurrentTopic.Trim();
 
         int? mqttPort = null;
         if (options.MqttPort.HasValue && options.MqttPort.Value > 0 && options.MqttPort.Value <= 65535)
@@ -223,6 +227,8 @@ public sealed class SimulatorConfigurationProvider
             MqttPassword = string.IsNullOrEmpty(mqttPassword) ? null : mqttPassword,
             MqttStatusTopic = mqttStatusTopic,
             MqttPublishTopic = mqttPublishTopic,
+            MqttMeterTopic = mqttMeterTopic,
+            MqttCurrentTopic = mqttCurrentTopic,
         };
     }
 
@@ -254,6 +260,8 @@ public sealed class SimulatorConfigurationProvider
             MqttPassword = options.MqttPassword,
             MqttStatusTopic = options.MqttStatusTopic,
             MqttPublishTopic = options.MqttPublishTopic,
+            MqttMeterTopic = options.MqttMeterTopic,
+            MqttCurrentTopic = options.MqttCurrentTopic,
         };
     }
 

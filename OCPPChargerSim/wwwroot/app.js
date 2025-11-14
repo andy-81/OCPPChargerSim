@@ -30,6 +30,8 @@ const configMqttUsernameInput = document.getElementById("config-mqtt-username");
 const configMqttPasswordInput = document.getElementById("config-mqtt-password");
 const configMqttStatusTopicInput = document.getElementById("config-mqtt-status-topic");
 const configMqttPublishTopicInput = document.getElementById("config-mqtt-publish-topic");
+const configMqttMeterTopicInput = document.getElementById("config-mqtt-meter-topic");
+const configMqttCurrentTopicInput = document.getElementById("config-mqtt-current-topic");
 
 let logs = [];
 let configuration = {};
@@ -49,6 +51,8 @@ let mqttSettings = {
   password: "",
   statusTopic: "",
   publishTopic: "",
+  meterTopic: "",
+  currentTopic: "",
 };
 
 const maxLogs = 500;
@@ -142,6 +146,8 @@ function updateMqttFieldDisabledState() {
     configMqttPasswordInput,
     configMqttStatusTopicInput,
     configMqttPublishTopicInput,
+    configMqttMeterTopicInput,
+    configMqttCurrentTopicInput,
   ];
 
   inputs.forEach((input) => {
@@ -240,6 +246,14 @@ function populateConfigurationForm() {
     configMqttPublishTopicInput.value = mqttSettings.publishTopic ?? "";
   }
 
+  if (configMqttMeterTopicInput) {
+    configMqttMeterTopicInput.value = mqttSettings.meterTopic ?? "";
+  }
+
+  if (configMqttCurrentTopicInput) {
+    configMqttCurrentTopicInput.value = mqttSettings.currentTopic ?? "";
+  }
+
   updateMqttFieldDisabledState();
 }
 
@@ -305,6 +319,8 @@ function renderConfiguration() {
   ]);
   entries.push(["MQTT Status Topic", mqttSettings.statusTopic || "—"]);
   entries.push(["MQTT Publish Topic", mqttSettings.publishTopic || "—"]);
+  entries.push(["MQTT Meter Topic", mqttSettings.meterTopic || "—"]);
+  entries.push(["MQTT Current Topic", mqttSettings.currentTopic || "—"]);
   if (mqttSettings.username) {
     entries.push(["MQTT Username", mqttSettings.username]);
   }
@@ -397,6 +413,8 @@ async function loadSnapshot() {
         password: snapshot.mqtt.password ?? "",
         statusTopic: snapshot.mqtt.statusTopic ?? "",
         publishTopic: snapshot.mqtt.publishTopic ?? "",
+        meterTopic: snapshot.mqtt.meterTopic ?? "",
+        currentTopic: snapshot.mqtt.currentTopic ?? "",
       };
     } else {
       mqttSettings = {
@@ -407,6 +425,8 @@ async function loadSnapshot() {
         password: "",
         statusTopic: "",
         publishTopic: "",
+        meterTopic: "",
+        currentTopic: "",
       };
     }
 
@@ -582,6 +602,8 @@ function setupControls(connection) {
     const mqttPasswordValue = configMqttPasswordInput ? configMqttPasswordInput.value : "";
     const mqttStatusTopicValue = configMqttStatusTopicInput ? configMqttStatusTopicInput.value.trim() : "";
     const mqttPublishTopicValue = configMqttPublishTopicInput ? configMqttPublishTopicInput.value.trim() : "";
+    const mqttMeterTopicValue = configMqttMeterTopicInput ? configMqttMeterTopicInput.value.trim() : "";
+    const mqttCurrentTopicValue = configMqttCurrentTopicInput ? configMqttCurrentTopicInput.value.trim() : "";
 
     let parsedMqttPort = null;
     if (mqttPortText) {
@@ -663,6 +685,8 @@ function setupControls(connection) {
       mqttPassword: mqttEnabled ? mqttPasswordValue : null,
       mqttStatusTopic: mqttEnabled ? mqttStatusTopicValue : null,
       mqttPublishTopic: mqttEnabled ? mqttPublishTopicValue : null,
+      mqttMeterTopic: mqttEnabled && mqttMeterTopicValue ? mqttMeterTopicValue : null,
+      mqttCurrentTopic: mqttEnabled && mqttCurrentTopicValue ? mqttCurrentTopicValue : null,
     };
 
     const submitButton = configForm.querySelector("button[type='submit']");

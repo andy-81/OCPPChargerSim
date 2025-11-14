@@ -29,6 +29,8 @@ public sealed class SimulatorState
     private string _mqttPassword = string.Empty;
     private string _mqttStatusTopic = string.Empty;
     private string _mqttPublishTopic = string.Empty;
+    private string _mqttMeterTopic = string.Empty;
+    private string _mqttCurrentTopic = string.Empty;
 
     public void AddLog(string message)
     {
@@ -189,7 +191,16 @@ public sealed class SimulatorState
         }
     }
 
-    public void SetMqttConfiguration(bool enabled, string? host, int? port, string? username, string? password, string? statusTopic, string? publishTopic)
+    public void SetMqttConfiguration(
+        bool enabled,
+        string? host,
+        int? port,
+        string? username,
+        string? password,
+        string? statusTopic,
+        string? publishTopic,
+        string? meterTopic,
+        string? currentTopic)
     {
         lock (_sync)
         {
@@ -200,6 +211,8 @@ public sealed class SimulatorState
             _mqttPassword = password ?? string.Empty;
             _mqttStatusTopic = statusTopic ?? string.Empty;
             _mqttPublishTopic = publishTopic ?? string.Empty;
+            _mqttMeterTopic = meterTopic ?? string.Empty;
+            _mqttCurrentTopic = currentTopic ?? string.Empty;
         }
     }
 
@@ -214,7 +227,9 @@ public sealed class SimulatorState
                 string.IsNullOrWhiteSpace(_mqttUsername) ? null : _mqttUsername,
                 string.IsNullOrEmpty(_mqttPassword) ? null : _mqttPassword,
                 string.IsNullOrWhiteSpace(_mqttStatusTopic) ? null : _mqttStatusTopic,
-                string.IsNullOrWhiteSpace(_mqttPublishTopic) ? null : _mqttPublishTopic);
+                string.IsNullOrWhiteSpace(_mqttPublishTopic) ? null : _mqttPublishTopic,
+                string.IsNullOrWhiteSpace(_mqttMeterTopic) ? null : _mqttMeterTopic,
+                string.IsNullOrWhiteSpace(_mqttCurrentTopic) ? null : _mqttCurrentTopic);
         }
     }
 
@@ -266,4 +281,6 @@ public readonly record struct MqttConfigurationSnapshot(
     string? Username,
     string? Password,
     string? StatusTopic,
-    string? PublishTopic);
+    string? PublishTopic,
+    string? MeterTopic,
+    string? CurrentTopic);

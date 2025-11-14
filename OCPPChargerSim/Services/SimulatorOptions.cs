@@ -33,4 +33,8 @@ public sealed class SimulatorOptions
     public string? MqttStatusTopic { get; set; }
 
     public string? MqttPublishTopic { get; set; }
+
+    public string? MqttMeterTopic { get; set; }
+
+    public string? MqttCurrentTopic { get; set; }
 }
