@@ -113,6 +113,44 @@
             <span>Charge Box Serial Number</span>
             <input type="text" id="config-cb-serial" required />
           </label>
+          <hr class="form-divider" />
+          <h3 class="modal-section-heading">MQTT Integration</h3>
+          <label class="toggle">
+            <input type="checkbox" id="config-mqtt-enabled" />
+            <span>Enable MQTT bridge</span>
+          </label>
+          <label>
+            <span>Broker Host</span>
+            <input type="text" id="config-mqtt-host" />
+          </label>
+          <label>
+            <span>Broker Port</span>
+            <input type="number" id="config-mqtt-port" min="1" max="65535" />
+          </label>
+          <label>
+            <span>Username</span>
+            <input type="text" id="config-mqtt-username" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input type="password" id="config-mqtt-password" />
+          </label>
+          <label>
+            <span>Status Topic</span>
+            <input type="text" id="config-mqtt-status-topic" />
+          </label>
+          <label>
+            <span>Publish Topic</span>
+            <input type="text" id="config-mqtt-publish-topic" />
+          </label>
+          <label>
+            <span>Meter Topic</span>
+            <input type="text" id="config-mqtt-meter-topic" />
+          </label>
+          <label>
+            <span>Charge Current Topic</span>
+            <input type="text" id="config-mqtt-current-topic" />
+          </label>
           <div id="config-error" class="form-error" role="alert"></div>
           <div class="modal-actions">
             <button type="button" id="config-cancel" class="secondary-button">Cancel</button>
