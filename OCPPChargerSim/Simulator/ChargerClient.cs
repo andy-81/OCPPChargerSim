@@ -75,6 +75,7 @@ public sealed class ChargerClient
     private readonly bool _supportSoC;
     private readonly bool _heartbeatEnabled;
     private readonly string _meterStateFilePath;
+    private Func<ExternalMeterValues?>? _externalMeterValuesProvider;
     private CancellationToken _runCancellationToken;
     private bool _isRunning;
 
@@ -111,6 +112,15 @@ public sealed class ChargerClient
     public IReadOnlyDictionary<string, string> BootConfiguration => new Dictionary<string, string>(_bootPayload);
 
     public MeterSample LatestSample { get; private set; } = MeterSample.Empty;
+
+    /// <summary>
+    /// Wires up a delegate that the client calls each time it builds a MeterValues payload.
+    /// Return null from the delegate to fall back to simulated values.
+    /// </summary>
+    public void SetExternalMeterValuesProvider(Func<ExternalMeterValues?> provider)
+    {
+        _externalMeterValuesProvider = provider;
+    }
 
     public void SetLocalConfiguration(string key, string value)
     {
@@ -879,6 +889,8 @@ public sealed class ChargerClient
         var tcs = RegisterCall(uniqueId);
 
         var sample = LatestSample;
+        // Overlay with real values from Home Assistant if available
+        sample = ApplyExternalValues(sample);
         var sampledValues = BuildSampledValues(measurands, sample, "Sample.Clock");
 
         var payload = new Dictionary<string, object>
@@ -1026,6 +1038,9 @@ public sealed class ChargerClient
         var energyWhValue = Math.Round(_meterAccumulatorWh, 0, MidpointRounding.AwayFromZero);
 
         var sample = new MeterSample(_meterAccumulatorWh, powerKwValue, currentAmps, _supportSoC ? FixedStateOfCharge : -1, now);
+
+        // Overlay with real values from Home Assistant if available
+        sample = ApplyExternalValues(sample);
 
         // Build sampled values from the configured MeterValuesSampledData list
         var measurands = GetSampledMeasurands();
@@ -1834,16 +1849,48 @@ public sealed class ChargerClient
     }
 
     /// <summary>
+    /// Overlays the given sample with any real values from Home Assistant.
+    /// Fields that were not provided by the external source keep the simulated value.
+    /// </summary>
+    private MeterSample ApplyExternalValues(MeterSample sample)
+    {
+        var ext = _externalMeterValuesProvider?.Invoke();
+        if (ext is null)
+        {
+            return sample;
+        }
+
+        // Update the accumulator so energy stays consistent on the next simulated tick
+        if (ext.EnergyWhImport.HasValue)
+        {
+            _meterAccumulatorWh = ext.EnergyWhImport.Value;
+            _meterValue = (int)Math.Round(_meterAccumulatorWh);
+        }
+
+        return new MeterSample(
+            ext.EnergyWhImport ?? sample.EnergyWh,
+            ext.PowerKwImport ?? sample.PowerKw,
+            ext.CurrentAmpsOffered ?? sample.CurrentAmps,
+            ext.StateOfChargePercent ?? sample.StateOfCharge,
+            sample.Timestamp);
+    }
+
+    /// <summary>
+    /// Holds supplementary external values used when building measurand entries
+    /// that aren't covered by the MeterSample struct (Frequency, Power.Offered, etc.).
+    /// </summary>
+    private ExternalMeterValues? GetCurrentExternalValues() => _externalMeterValuesProvider?.Invoke();
+
+    /// <summary>
     /// Builds a sampledValue array for the given measurand list and current meter state.
-    /// Measurands not supported by this charger (e.g. V2G export, Voltage) are reported
-    /// as zero so Octopus receives a complete, parseable payload.
     /// </summary>
     private object[] BuildSampledValues(IEnumerable<string> measurands, MeterSample sample, string context)
     {
+        var ext = GetCurrentExternalValues();
         var result = new List<object>();
         foreach (var measurand in measurands)
         {
-            var entry = BuildSingleMeasurand(measurand, sample, context);
+            var entry = BuildSingleMeasurand(measurand, sample, ext, context);
             if (entry is not null)
             {
                 result.Add(entry);
@@ -1853,27 +1900,43 @@ public sealed class ChargerClient
         return result.ToArray();
     }
 
-    private Dictionary<string, object>? BuildSingleMeasurand(string measurand, MeterSample sample, string context)
+    private Dictionary<string, object>? BuildSingleMeasurand(string measurand, MeterSample sample, ExternalMeterValues? ext, string context)
     {
         // Map each measurand to its value and unit.
-        // For measurands this charger does not support (V2G export, Voltage, Frequency)
-        // we return 0 so Octopus knows what the charger is reporting.
+        // External (Home Assistant) values take priority where available.
         return measurand.ToUpperInvariant() switch
         {
-            "ENERGY.ACTIVE.IMPORT.REGISTER" => MeasurandEntry(measurand, sample.EnergyWh.ToString("0", CultureInfo.InvariantCulture), "Wh", context),
-            "POWER.ACTIVE.IMPORT" => MeasurandEntry(measurand, sample.PowerKw.ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
-            "CURRENT.IMPORT" => MeasurandEntry(measurand, sample.CurrentAmps.ToString("0.0", CultureInfo.InvariantCulture), "A", context),
-            "CURRENT.OFFERED" => MeasurandEntry(measurand, sample.CurrentAmps.ToString("0.0", CultureInfo.InvariantCulture), "A", context),
-            "POWER.OFFERED" => MeasurandEntry(measurand, sample.PowerKw.ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
-            "FREQUENCY" => MeasurandEntry(measurand, GridFrequencyHz.ToString("0.0", CultureInfo.InvariantCulture), "Hz", context),
-            "SOC" when _supportSoC && sample.StateOfCharge >= 0 => MeasurandEntry(measurand, sample.StateOfCharge.ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
+            "ENERGY.ACTIVE.IMPORT.REGISTER" => MeasurandEntry(measurand,
+                (ext?.EnergyWhImport ?? sample.EnergyWh).ToString("0", CultureInfo.InvariantCulture), "Wh", context),
+
+            "POWER.ACTIVE.IMPORT" => MeasurandEntry(measurand,
+                (ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+
+            "CURRENT.IMPORT" => MeasurandEntry(measurand,
+                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+
+            "CURRENT.OFFERED" => MeasurandEntry(measurand,
+                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+
+            "POWER.OFFERED" => MeasurandEntry(measurand,
+                (ext?.PowerKwOffered ?? ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+
+            "FREQUENCY" => MeasurandEntry(measurand,
+                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hz", context),
+
+            "SOC" when _supportSoC || (ext?.StateOfChargePercent.HasValue == true) => MeasurandEntry(measurand,
+                (ext?.StateOfChargePercent ?? (_supportSoC && sample.StateOfCharge >= 0 ? sample.StateOfCharge : 0)).ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
+
             "SOC" => MeasurandEntry(measurand, "0.0", "Percent", context),
-            // V2G / export measurands — this charger does not support V2G
+
+            // V2G / export measurands — not supported, always 0
             "ENERGY.ACTIVE.EXPORT.REGISTER" => MeasurandEntry(measurand, "0", "Wh", context),
             "POWER.ACTIVE.EXPORT" => MeasurandEntry(measurand, "0.0", "kW", context),
             "CURRENT.EXPORT" => MeasurandEntry(measurand, "0.0", "A", context),
+
             "VOLTAGE" => MeasurandEntry(measurand, NominalVoltage.ToString("0.0", CultureInfo.InvariantCulture), "V", context),
-            // Unknown measurands are silently skipped rather than sending garbage data
+
+            // Unknown measurands are silently skipped
             _ => null,
         };
     }
@@ -1922,6 +1985,9 @@ public sealed class ChargerClient
         var energyValue = sample.EnergyWh > 0 ? sample.EnergyWh : _meterAccumulatorWh;
         var bootSample = new MeterSample(energyValue, sample.PowerKw, sample.CurrentAmps,
             _supportSoC ? FixedStateOfCharge : -1, DateTimeOffset.UtcNow);
+
+        // Overlay with real values from Home Assistant if available
+        bootSample = ApplyExternalValues(bootSample);
 
         // At boot we report the full set of sampled measurands so Octopus can initialise all channels
         var measurands = GetSampledMeasurands();
