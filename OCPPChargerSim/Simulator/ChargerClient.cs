@@ -43,6 +43,7 @@ public sealed class ChargerClient
     private const double TargetCurrentAmps = 20.0;
     private const double CurrentJitterAmps = 4.0;
     private const double FixedStateOfCharge = 21.0;
+    private const double GridFrequencyHz = 50.0;
 
     private readonly Uri _url;
     private readonly string _identity;
@@ -66,6 +67,7 @@ public sealed class ChargerClient
     private double _meterAccumulatorWh;
     private DateTimeOffset _lastMeterSampleTimestamp = DateTimeOffset.MinValue;
     private CancellationTokenSource? _meterLoopCts;
+    private CancellationTokenSource? _clockAlignedLoopCts;
     private CancellationTokenSource? _manualSimulationCts;
     private CancellationTokenSource? _heartbeatLoopCts;
     private readonly object _manualLock = new();
@@ -125,6 +127,11 @@ public sealed class ChargerClient
         if (_heartbeatEnabled && string.Equals(key, "HeartbeatInterval", StringComparison.OrdinalIgnoreCase) && _isRunning)
         {
             StartHeartbeatLoop(_runCancellationToken);
+        }
+
+        if (string.Equals(key, "ClockAlignedDataInterval", StringComparison.OrdinalIgnoreCase) && _isRunning)
+        {
+            StartClockAlignedLoop(_runCancellationToken);
         }
 
         ConfigurationChanged?.Invoke(key, value);
@@ -283,7 +290,6 @@ public sealed class ChargerClient
             _configuration[$"Boot.{kvp.Key}"] = kvp.Value;
         }
 
-
         _meterAccumulatorWh = LoadMeterAccumulator();
         _meterValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
         _meterStartValue = _meterValue;
@@ -335,6 +341,7 @@ public sealed class ChargerClient
 
                 await EnsureRemoteStartConfigurationAsync(cancellationToken).ConfigureAwait(false);
                 StartHeartbeatLoop(cancellationToken);
+                StartClockAlignedLoop(cancellationToken);
 
                 await receiveTask.ConfigureAwait(false);
             }
@@ -354,6 +361,7 @@ public sealed class ChargerClient
             {
                 StopMeterValueLoop();
                 StopHeartbeatLoop();
+                StopClockAlignedLoop();
 
                 var socket = _webSocket;
                 _webSocket = null;
@@ -604,48 +612,48 @@ public sealed class ChargerClient
         await BeginChargingSequenceAsync(idTag, payload, uniqueId, StateInitiator.Remote, cancellationToken).ConfigureAwait(false);
     }
 
-private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload, string? callUniqueId, StateInitiator initiator, CancellationToken cancellationToken)
-{
-    _activeIdTag = idTag;
-    TransitionVehicleState("Preparing", initiator);
-    _logger.Info($"Vehicle state updated to: {_vehicle.State}");
-
-    if (!string.IsNullOrEmpty(callUniqueId))
+    private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload, string? callUniqueId, StateInitiator initiator, CancellationToken cancellationToken)
     {
-        await SendCallResultAsync(callUniqueId!, new Dictionary<string, object>
+        _activeIdTag = idTag;
+        TransitionVehicleState("Preparing", initiator);
+        _logger.Info($"Vehicle state updated to: {_vehicle.State}");
+
+        if (!string.IsNullOrEmpty(callUniqueId))
         {
-            ["status"] = "Accepted",
-        }, cancellationToken).ConfigureAwait(false);
+            await SendCallResultAsync(callUniqueId!, new Dictionary<string, object>
+            {
+                ["status"] = "Accepted",
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        await SendStatusNotificationAsync("Preparing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
+
+        var started = await SendStartTransactionAsync(idTag, payload, cancellationToken).ConfigureAwait(false);
+        if (!started)
+        {
+            TransitionVehicleState("SuspendedEV", initiator);
+            _activeIdTag = null;
+            await SendStatusNotificationAsync("SuspendedEV", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        TransitionVehicleState("Charging", initiator);
+        _logger.Info($"Vehicle state updated to: {_vehicle.State}");
+
+        await SendStatusNotificationAsync("Charging", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
+
+        StartMeterValueLoop(cancellationToken);
+        await SendMeterValuesAsync(cancellationToken).ConfigureAwait(false);
     }
-
-    await SendStatusNotificationAsync("Preparing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
-
-    var started = await SendStartTransactionAsync(idTag, payload, cancellationToken).ConfigureAwait(false);
-    if (!started)
-    {
-        TransitionVehicleState("SuspendedEV", initiator);
-        _activeIdTag = null;
-        await SendStatusNotificationAsync("SuspendedEV", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-        return;
-    }
-
-    try
-    {
-        await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-        return;
-    }
-
-    TransitionVehicleState("Charging", initiator);
-    _logger.Info($"Vehicle state updated to: {_vehicle.State}");
-
-    await SendStatusNotificationAsync("Charging", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
-
-    StartMeterValueLoop(cancellationToken);
-    await SendMeterValuesAsync(cancellationToken).ConfigureAwait(false);
-}
 
     private async Task<bool> SendStartTransactionAsync(string idTag, JsonElement payload, CancellationToken cancellationToken)
     {
@@ -770,6 +778,143 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Clock-aligned MeterValues loop
+    // Fires on clock boundaries defined by ClockAlignedDataInterval (seconds).
+    // Sends the measurands listed in MeterValuesAlignedData.
+    // ---------------------------------------------------------------------------
+
+    private void StartClockAlignedLoop(CancellationToken parentToken)
+    {
+        StopClockAlignedLoop();
+
+        var interval = GetClockAlignedInterval();
+        if (interval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+        _clockAlignedLoopCts = linked;
+        var loopToken = linked.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!loopToken.IsCancellationRequested)
+                {
+                    var delay = TimeUntilNextClockBoundary(interval);
+                    await Task.Delay(delay, loopToken).ConfigureAwait(false);
+                    if (loopToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    await SendClockAlignedMeterValuesAsync(loopToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (loopToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Clock-aligned MeterValues loop failed");
+            }
+        }, CancellationToken.None);
+    }
+
+    private void StopClockAlignedLoop()
+    {
+        if (_clockAlignedLoopCts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _clockAlignedLoopCts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        finally
+        {
+            _clockAlignedLoopCts.Dispose();
+            _clockAlignedLoopCts = null;
+        }
+    }
+
+    /// <summary>
+    /// Returns the delay until the next clock-aligned boundary.
+    /// For example, with interval=900 (15 min) the boundaries are 00:00, 00:15, 00:30, 00:45.
+    /// </summary>
+    private static TimeSpan TimeUntilNextClockBoundary(TimeSpan interval)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var secondsInDay = (long)now.TimeOfDay.TotalSeconds;
+        var intervalSeconds = (long)interval.TotalSeconds;
+        var secondsUntilNext = intervalSeconds - (secondsInDay % intervalSeconds);
+        if (secondsUntilNext == 0)
+        {
+            secondsUntilNext = intervalSeconds;
+        }
+
+        return TimeSpan.FromSeconds(secondsUntilNext);
+    }
+
+    /// <summary>
+    /// Sends a clock-aligned MeterValues message with the measurands listed
+    /// in MeterValuesAlignedData, using Sample.Clock context.
+    /// </summary>
+    private async Task SendClockAlignedMeterValuesAsync(CancellationToken cancellationToken)
+    {
+        var measurands = GetAlignedMeasurands();
+        if (measurands.Count == 0)
+        {
+            return;
+        }
+
+        var uniqueId = GenerateUniqueId();
+        var tcs = RegisterCall(uniqueId);
+
+        var sample = LatestSample;
+        var sampledValues = BuildSampledValues(measurands, sample, "Sample.Clock");
+
+        var payload = new Dictionary<string, object>
+        {
+            ["connectorId"] = _connectorId,
+            ["meterValue"] = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
+                    ["sampledValue"] = sampledValues,
+                },
+            },
+        };
+
+        if (_activeTransactionId.HasValue)
+        {
+            payload["transactionId"] = _activeTransactionId.Value;
+        }
+
+        await SendCallAsync(uniqueId, "MeterValues", payload, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(35), cancellationToken));
+            if (completed != tcs.Task)
+            {
+                _logger.Info("Clock-aligned MeterValues response timed out");
+            }
+        }
+        finally
+        {
+            _pendingCalls.TryRemove(uniqueId, out _);
+        }
+    }
+
     private void StartHeartbeatLoop(CancellationToken parentToken)
     {
         StopHeartbeatLoop();
@@ -879,14 +1024,12 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         _meterAccumulatorWh += incrementWh;
         _meterValue = (int)Math.Round(_meterAccumulatorWh);
         var energyWhValue = Math.Round(_meterAccumulatorWh, 0, MidpointRounding.AwayFromZero);
-        var socValue = FixedStateOfCharge;
-        var energy = energyWhValue.ToString(CultureInfo.InvariantCulture);
-        var power = powerKwValue.ToString("0.0", CultureInfo.InvariantCulture);
-        string? soc = null;
-        if (_supportSoC)
-        {
-            soc = socValue.ToString("0.0", CultureInfo.InvariantCulture);
-        }
+
+        var sample = new MeterSample(_meterAccumulatorWh, powerKwValue, currentAmps, _supportSoC ? FixedStateOfCharge : -1, now);
+
+        // Build sampled values from the configured MeterValuesSampledData list
+        var measurands = GetSampledMeasurands();
+        var sampledValues = BuildSampledValues(measurands, sample, "Sample.Periodic");
 
         var payload = new Dictionary<string, object>
         {
@@ -896,48 +1039,11 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             {
                 new Dictionary<string, object>
                 {
-                    ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
-                    ["sampledValue"] = new object[]
-                    {
-                        new Dictionary<string, object>
-                        {
-                            ["value"] = energy,
-                            ["measurand"] = "Energy.Active.Import.Register",
-                            ["unit"] = "Wh",
-                            ["context"] = "Sample.Periodic",
-                        },
-                        new Dictionary<string, object>
-                        {
-                            ["value"] = power,
-                            ["measurand"] = "Power.Active.Import",
-                            ["unit"] = "kW",
-                            ["context"] = "Sample.Periodic",
-                        },
-                    },
+                    ["timestamp"] = now.ToString("O"),
+                    ["sampledValue"] = sampledValues,
                 },
             },
         };
-
-        if (_supportSoC &&
-            payload.TryGetValue("meterValue", out var meterValueObj) &&
-            meterValueObj is object[] meterArray &&
-            meterArray.Length > 0 &&
-            meterArray[0] is Dictionary<string, object> meterEntryCandidate &&
-            meterEntryCandidate.TryGetValue("sampledValue", out var sampledObj) &&
-            sampledObj is object[] sampledValues)
-        {
-            var meterEntry = meterEntryCandidate;
-            var extended = new object[sampledValues.Length + 1];
-            Array.Copy(sampledValues, extended, sampledValues.Length);
-            extended[^1] = new Dictionary<string, object>
-            {
-                ["value"] = soc!,
-                ["measurand"] = "SoC",
-                ["unit"] = "Percent",
-                ["context"] = "Sample.Periodic",
-            };
-            meterEntry["sampledValue"] = extended;
-        }
 
         await SendCallAsync(uniqueId, "MeterValues", payload, cancellationToken).ConfigureAwait(false);
 
@@ -954,7 +1060,7 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             _pendingCalls.TryRemove(uniqueId, out _);
         }
 
-        PublishSample(new MeterSample(_meterAccumulatorWh, powerKwValue, currentAmps, _supportSoC ? socValue : -1, DateTimeOffset.UtcNow));
+        PublishSample(sample);
         PersistMeterAccumulator();
     }
 
@@ -1029,6 +1135,11 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         if (_heartbeatEnabled && string.Equals(key, "HeartbeatInterval", StringComparison.OrdinalIgnoreCase))
         {
             StartHeartbeatLoop(cancellationToken);
+        }
+
+        if (string.Equals(key, "ClockAlignedDataInterval", StringComparison.OrdinalIgnoreCase))
+        {
+            StartClockAlignedLoop(cancellationToken);
         }
 
         await SendCallResultAsync(uniqueId, new Dictionary<string, object>
@@ -1171,7 +1282,6 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         await SendStatusNotificationAsync("SuspendedEV", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
         await stopTask.ConfigureAwait(false);
-
     }
 
     private async Task<bool> SendStopTransactionAsync(string reason, CancellationToken cancellationToken)
@@ -1312,6 +1422,27 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
             };
 
             await SendStatusNotificationAsync(statusToSend, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(requestedMessage, "MeterValues", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendCallResultAsync(uniqueId, new Dictionary<string, object>
+            {
+                ["status"] = "Accepted",
+            }, cancellationToken).ConfigureAwait(false);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendBootMeterValuesAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, "Failed to send triggered MeterValues");
+                }
+            }, CancellationToken.None);
             return;
         }
 
@@ -1530,38 +1661,38 @@ private async Task BeginChargingSequenceAsync(string idTag, JsonElement payload,
         MeterSampled?.Invoke(sample);
     }
 
-private void UpdateLocalVehicleState(string status, StateInitiator initiator)
-{
-    var normalized = status.Trim();
-
-    switch (normalized)
+    private void UpdateLocalVehicleState(string status, StateInitiator initiator)
     {
-        case "Available":
-            StopMeterValueLoop();
-            TransitionVehicleState("Available", initiator);
-            break;
-        case "Charging":
-            TransitionVehicleState("Charging", initiator);
-            break;
-        case "Preparing":
-            TransitionVehicleState("Preparing", initiator);
-            break;
-        case "SuspendedEV":
-            StopMeterValueLoop();
-            TransitionVehicleState("SuspendedEV", initiator);
-            break;
-        case "Finishing":
-            TransitionVehicleState("Finishing", initiator);
-            break;
-        case "Unavailable":
-            StopMeterValueLoop();
-            TransitionVehicleState("Unavailable", initiator);
-            break;
-        default:
-            TransitionVehicleState(normalized, initiator);
-            break;
+        var normalized = status.Trim();
+
+        switch (normalized)
+        {
+            case "Available":
+                StopMeterValueLoop();
+                TransitionVehicleState("Available", initiator);
+                break;
+            case "Charging":
+                TransitionVehicleState("Charging", initiator);
+                break;
+            case "Preparing":
+                TransitionVehicleState("Preparing", initiator);
+                break;
+            case "SuspendedEV":
+                StopMeterValueLoop();
+                TransitionVehicleState("SuspendedEV", initiator);
+                break;
+            case "Finishing":
+                TransitionVehicleState("Finishing", initiator);
+                break;
+            case "Unavailable":
+                StopMeterValueLoop();
+                TransitionVehicleState("Unavailable", initiator);
+                break;
+            default:
+                TransitionVehicleState(normalized, initiator);
+                break;
+        }
     }
-}
 
     private string GetFallbackIdTag()
     {
@@ -1617,6 +1748,22 @@ private void UpdateLocalVehicleState(string status, StateInitiator initiator)
         return TimeSpan.FromSeconds(15);
     }
 
+    private TimeSpan GetClockAlignedInterval()
+    {
+        string? configured;
+        lock (_configuration)
+        {
+            _configuration.TryGetValue("ClockAlignedDataInterval", out configured);
+        }
+
+        if (configured is not null && int.TryParse(configured, out var seconds) && seconds > 0)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return TimeSpan.Zero;
+    }
+
     private TimeSpan GetHeartbeatInterval()
     {
         string? configured;
@@ -1631,6 +1778,115 @@ private void UpdateLocalVehicleState(string status, StateInitiator initiator)
         }
 
         return TimeSpan.FromSeconds(60);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Measurand helpers
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the list of measurands from MeterValuesSampledData config,
+    /// defaulting to Energy + Power if empty.
+    /// </summary>
+    private List<string> GetSampledMeasurands()
+    {
+        string? configured;
+        lock (_configuration)
+        {
+            _configuration.TryGetValue("MeterValuesSampledData", out configured);
+        }
+
+        return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register", "Power.Active.Import" });
+    }
+
+    /// <summary>
+    /// Returns the list of measurands from MeterValuesAlignedData config.
+    /// </summary>
+    private List<string> GetAlignedMeasurands()
+    {
+        string? configured;
+        lock (_configuration)
+        {
+            _configuration.TryGetValue("MeterValuesAlignedData", out configured);
+        }
+
+        return ParseMeasurandList(configured, Array.Empty<string>());
+    }
+
+    private static List<string> ParseMeasurandList(string? csv, IEnumerable<string> defaults)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+        {
+            return new List<string>(defaults);
+        }
+
+        var result = new List<string>();
+        foreach (var part in csv.Split(','))
+        {
+            var trimmed = part.Trim();
+            if (!string.IsNullOrEmpty(trimmed))
+            {
+                result.Add(trimmed);
+            }
+        }
+
+        return result.Count > 0 ? result : new List<string>(defaults);
+    }
+
+    /// <summary>
+    /// Builds a sampledValue array for the given measurand list and current meter state.
+    /// Measurands not supported by this charger (e.g. V2G export, Voltage) are reported
+    /// as zero so Octopus receives a complete, parseable payload.
+    /// </summary>
+    private object[] BuildSampledValues(IEnumerable<string> measurands, MeterSample sample, string context)
+    {
+        var result = new List<object>();
+        foreach (var measurand in measurands)
+        {
+            var entry = BuildSingleMeasurand(measurand, sample, context);
+            if (entry is not null)
+            {
+                result.Add(entry);
+            }
+        }
+
+        return result.ToArray();
+    }
+
+    private Dictionary<string, object>? BuildSingleMeasurand(string measurand, MeterSample sample, string context)
+    {
+        // Map each measurand to its value and unit.
+        // For measurands this charger does not support (V2G export, Voltage, Frequency)
+        // we return 0 so Octopus knows what the charger is reporting.
+        return measurand.ToUpperInvariant() switch
+        {
+            "ENERGY.ACTIVE.IMPORT.REGISTER" => MeasurandEntry(measurand, sample.EnergyWh.ToString("0", CultureInfo.InvariantCulture), "Wh", context),
+            "POWER.ACTIVE.IMPORT" => MeasurandEntry(measurand, sample.PowerKw.ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+            "CURRENT.IMPORT" => MeasurandEntry(measurand, sample.CurrentAmps.ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+            "CURRENT.OFFERED" => MeasurandEntry(measurand, sample.CurrentAmps.ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+            "POWER.OFFERED" => MeasurandEntry(measurand, sample.PowerKw.ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+            "FREQUENCY" => MeasurandEntry(measurand, GridFrequencyHz.ToString("0.0", CultureInfo.InvariantCulture), "Hz", context),
+            "SOC" when _supportSoC && sample.StateOfCharge >= 0 => MeasurandEntry(measurand, sample.StateOfCharge.ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
+            "SOC" => MeasurandEntry(measurand, "0.0", "Percent", context),
+            // V2G / export measurands — this charger does not support V2G
+            "ENERGY.ACTIVE.EXPORT.REGISTER" => MeasurandEntry(measurand, "0", "Wh", context),
+            "POWER.ACTIVE.EXPORT" => MeasurandEntry(measurand, "0.0", "kW", context),
+            "CURRENT.EXPORT" => MeasurandEntry(measurand, "0.0", "A", context),
+            "VOLTAGE" => MeasurandEntry(measurand, NominalVoltage.ToString("0.0", CultureInfo.InvariantCulture), "V", context),
+            // Unknown measurands are silently skipped rather than sending garbage data
+            _ => null,
+        };
+    }
+
+    private static Dictionary<string, object> MeasurandEntry(string measurand, string value, string unit, string context)
+    {
+        return new Dictionary<string, object>
+        {
+            ["value"] = value,
+            ["measurand"] = measurand,
+            ["unit"] = unit,
+            ["context"] = context,
+        };
     }
 
     private static bool TryGetString(JsonElement element, string propertyName, out string value)
@@ -1664,46 +1920,12 @@ private void UpdateLocalVehicleState(string status, StateInitiator initiator)
 
         var sample = LatestSample;
         var energyValue = sample.EnergyWh > 0 ? sample.EnergyWh : _meterAccumulatorWh;
-        var powerValue = sample.PowerKw;
-        var currentValue = sample.CurrentAmps;
+        var bootSample = new MeterSample(energyValue, sample.PowerKw, sample.CurrentAmps,
+            _supportSoC ? FixedStateOfCharge : -1, DateTimeOffset.UtcNow);
 
-        var sampledValues = new List<Dictionary<string, object>>
-        {
-            new()
-            {
-                ["value"] = energyValue.ToString("0", CultureInfo.InvariantCulture),
-                ["measurand"] = "Energy.Active.Import.Register",
-                ["unit"] = "Wh",
-                ["context"] = "Sample.Clock",
-            },
-        };
-
-        sampledValues.Add(new Dictionary<string, object>
-        {
-            ["value"] = powerValue.ToString("0.0", CultureInfo.InvariantCulture),
-            ["measurand"] = "Power.Active.Import",
-            ["unit"] = "kW",
-            ["context"] = "Sample.Clock",
-        });
-
-        sampledValues.Add(new Dictionary<string, object>
-        {
-            ["value"] = currentValue.ToString("0.0", CultureInfo.InvariantCulture),
-            ["measurand"] = "Current.Import",
-            ["unit"] = "A",
-            ["context"] = "Sample.Clock",
-        });
-
-        if (_supportSoC)
-        {
-            sampledValues.Add(new Dictionary<string, object>
-            {
-                ["value"] = FixedStateOfCharge.ToString("0.0", CultureInfo.InvariantCulture),
-                ["measurand"] = "SoC",
-                ["unit"] = "Percent",
-                ["context"] = "Sample.Clock",
-            });
-        }
+        // At boot we report the full set of sampled measurands so Octopus can initialise all channels
+        var measurands = GetSampledMeasurands();
+        var sampledValues = BuildSampledValues(measurands, bootSample, "Sample.Clock");
 
         var payload = new Dictionary<string, object>
         {
@@ -1713,7 +1935,7 @@ private void UpdateLocalVehicleState(string status, StateInitiator initiator)
                 new Dictionary<string, object>
                 {
                     ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
-                    ["sampledValue"] = sampledValues.ToArray(),
+                    ["sampledValue"] = sampledValues,
                 },
             },
         };
@@ -1738,7 +1960,7 @@ private void UpdateLocalVehicleState(string status, StateInitiator initiator)
             _pendingCalls.TryRemove(uniqueId, out _);
         }
 
-        PublishSample(new MeterSample(energyValue, powerValue, currentValue, _supportSoC ? FixedStateOfCharge : -1, DateTimeOffset.UtcNow));
+        PublishSample(bootSample);
     }
 
     private static string GenerateUniqueId()
