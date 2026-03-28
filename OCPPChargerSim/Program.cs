@@ -135,12 +135,52 @@ app.MapPost("/api/logging", (LoggingRequest request, SimulatorCoordinator coordi
     }
 });
 
+// ---------------------------------------------------------------------------
+// External meter values endpoint
+// Called by Home Assistant (or any external source) to push real meter data.
+// The simulator will use these values in the next MeterValues message to Octopus.
+// POST /api/meters
+// {
+//   "energyWhImport": 256937,       // Energy.Active.Import.Register in Wh
+//   "powerKwImport": 3.45,          // Power.Active.Import in kW
+//   "frequencyHz": 50.01,           // Frequency in Hz
+//   "powerKwOffered": 3.45,         // Power.Offered in kW
+//   "currentAmpsOffered": 15.0,     // Current.Offered in A
+//   "stateOfChargePercent": 42.0    // SoC in % (optional)
+// }
+// All fields are optional — omit any you don't have and the simulator will
+// fall back to its own calculated value for that measurand.
+// ---------------------------------------------------------------------------
+app.MapPost("/api/meters", (ExternalMeterValues values, SimulatorState state) =>
+{
+    state.SetExternalMeterValues(values);
+    return Results.Accepted();
+});
+
+app.MapGet("/api/meters", (SimulatorState state) =>
+{
+    var values = state.GetExternalMeterValues();
+    if (values is null)
+    {
+        return Results.Ok(new { source = "simulated", values = (object?)null });
+    }
+
+    return Results.Ok(new { source = "external", values });
+});
+
+app.MapDelete("/api/meters", (SimulatorState state) =>
+{
+    state.SetExternalMeterValues(null);
+    return Results.Accepted();
+});
+
 app.MapGet("/api/state", (SimulatorState state, SimulatorConfigurationProvider configProvider, ChargerCatalog catalog) =>
 {
     var sample = state.LatestSample;
     var (url, identity, authKey) = state.GetConnectionDetails();
     var (requiresConfiguration, configFileMissing) = state.ConfigurationStatus;
     var (chargePointSerial, chargeBoxSerial) = state.GetSerialNumbers();
+    var externalMeters = state.GetExternalMeterValues();
     return Results.Ok(new
     {
         vehicleState = state.VehicleState,
@@ -168,6 +208,7 @@ app.MapGet("/api/state", (SimulatorState state, SimulatorConfigurationProvider c
         }),
         selectedCharger = state.SelectedChargerId,
         serialNumbers = new { chargePointSerial, chargeBoxSerial },
+        externalMeterSource = externalMeters is not null ? "external" : "simulated",
     });
 });
 
