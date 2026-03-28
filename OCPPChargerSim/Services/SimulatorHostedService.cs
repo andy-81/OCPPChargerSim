@@ -130,6 +130,10 @@ public sealed class SimulatorHostedService : BackgroundService
             supportSoC: options.SupportSoC,
             enableHeartbeat: options.SupportHeartbeat);
 
+        // Wire up Home Assistant / external meter values so the client always
+        // reads the latest pushed values when it builds a MeterValues payload.
+        client.SetExternalMeterValuesProvider(() => _state.GetExternalMeterValues());
+
         _coordinator.Attach(client, logger);
         _state.SetVehicleState(client.VehicleState);
         _state.SetConfigurationSnapshot(client.ConfigurationSnapshot);
