@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OcppWeb.Hubs;
+using OcppSimulator;
 using OcppWeb.Services;
 
 var builder = WebApplication.CreateBuilder(args);
