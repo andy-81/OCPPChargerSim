@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using OcppSimulator;
+
 using OcppWeb.Hubs;
 
 namespace OcppWeb.Services;
@@ -129,6 +129,10 @@ public sealed class SimulatorHostedService : BackgroundService
             _storageOptions.DataDirectory,
             supportSoC: options.SupportSoC,
             enableHeartbeat: options.SupportHeartbeat);
+
+        // Wire up Home Assistant / external meter values so the client always
+        // reads the latest pushed values when it builds a MeterValues payload.
+        client.SetExternalMeterValuesProvider(() => _state.GetExternalMeterValues());
 
         _coordinator.Attach(client, logger);
         _state.SetVehicleState(client.VehicleState);

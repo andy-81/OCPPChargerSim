@@ -22,6 +22,7 @@ public sealed class SimulatorState
     private string? _selectedChargerId;
     private string _chargePointSerial = "0";
     private string _chargeBoxSerial = "0";
+    private OcppSimulator.ExternalMeterValues? _externalMeterValues;
 
     public void AddLog(string message)
     {
@@ -219,6 +220,43 @@ public sealed class SimulatorState
         lock (_sync)
         {
             return new Dictionary<string, string>(_bootConfiguration);
+        }
+    }
+
+    /// <summary>
+    /// Stores the latest meter values received from an external source (e.g. Home Assistant).
+    /// Pass null to clear and revert to simulated values.
+    /// </summary>
+    public void SetExternalMeterValues(OcppSimulator.ExternalMeterValues? values)
+    {
+        lock (_sync)
+        {
+            _externalMeterValues = values;
+        }
+    }
+
+    /// <summary>
+    /// Returns a snapshot of the latest external meter values, or null if none have been received.
+    /// </summary>
+    public OcppSimulator.ExternalMeterValues? GetExternalMeterValues()
+    {
+        lock (_sync)
+        {
+            if (_externalMeterValues is null)
+            {
+                return null;
+            }
+
+            // Return a copy so callers can't mutate shared state
+            return new OcppSimulator.ExternalMeterValues
+            {
+                EnergyWhImport = _externalMeterValues.EnergyWhImport,
+                PowerKwImport = _externalMeterValues.PowerKwImport,
+                FrequencyHz = _externalMeterValues.FrequencyHz,
+                PowerKwOffered = _externalMeterValues.PowerKwOffered,
+                CurrentAmpsOffered = _externalMeterValues.CurrentAmpsOffered,
+                StateOfChargePercent = _externalMeterValues.StateOfChargePercent,
+            };
         }
     }
 }
