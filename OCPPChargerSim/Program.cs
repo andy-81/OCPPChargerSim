@@ -6,7 +6,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OcppWeb.Hubs;
-using OcppSimulator;
 using OcppWeb.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -152,7 +151,7 @@ app.MapPost("/api/logging", (LoggingRequest request, SimulatorCoordinator coordi
 // All fields are optional — omit any you don't have and the simulator will
 // fall back to its own calculated value for that measurand.
 // ---------------------------------------------------------------------------
-app.MapPost("/api/meters", (ExternalMeterValues values, SimulatorState state) =>
+app.MapPost("/api/meters", (OcppSimulator.ExternalMeterValues values, SimulatorState state) =>
 {
     state.SetExternalMeterValues(values);
     return Results.Accepted();
