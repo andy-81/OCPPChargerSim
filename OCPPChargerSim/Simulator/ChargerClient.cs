@@ -1922,7 +1922,7 @@ public sealed class ChargerClient
                 (ext?.PowerKwOffered ?? ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
             "FREQUENCY" => MeasurandEntry(measurand,
-                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hz", context),
+                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hertz", context),
 
             "SOC" when _supportSoC || (ext?.StateOfChargePercent.HasValue == true) => MeasurandEntry(measurand,
                 (ext?.StateOfChargePercent ?? (_supportSoC && sample.StateOfCharge >= 0 ? sample.StateOfCharge : 0)).ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
