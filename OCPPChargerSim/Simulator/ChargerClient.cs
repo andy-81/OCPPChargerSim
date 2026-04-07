@@ -1945,13 +1945,15 @@ public sealed class ChargerClient
                 (ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
             "CURRENT.IMPORT" => MeasurandEntry(measurand,
-                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+                (ext?.PowerKwImport.HasValue == true
+                    ? ext!.PowerKwImport.Value * 1000.0 / NominalVoltage
+                    : sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "CURRENT.OFFERED" => MeasurandEntry(measurand,
-                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+                (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "POWER.OFFERED" => MeasurandEntry(measurand,
-                (ext?.PowerKwOffered ?? ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+                (ext?.PowerKwOffered ?? (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps) * NominalVoltage / 1000.0).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
             "FREQUENCY" => MeasurandEntry(measurand,
                 (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hertz", context),
