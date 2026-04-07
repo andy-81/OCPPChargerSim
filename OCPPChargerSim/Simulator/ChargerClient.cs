@@ -1945,9 +1945,7 @@ public sealed class ChargerClient
                 (ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
             "CURRENT.IMPORT" => MeasurandEntry(measurand,
-                (ext?.PowerKwImport.HasValue == true
-                    ? ext!.PowerKwImport.Value * 1000.0 / NominalVoltage
-                    : sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+                (ext?.CurrentAmpsImport ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "CURRENT.OFFERED" => MeasurandEntry(measurand,
                 (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),

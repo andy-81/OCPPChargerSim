@@ -18,6 +18,9 @@ public sealed class ExternalMeterValues
     /// <summary>Power.Offered in kW</summary>
     public double? PowerKwOffered { get; set; }
 
+    /// <summary>Current.Import (actual draw) in A</summary>
+    public double? CurrentAmpsImport { get; set; }
+
     /// <summary>Current.Offered in A</summary>
     public double? CurrentAmpsOffered { get; set; }
 

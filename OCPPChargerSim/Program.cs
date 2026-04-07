@@ -144,8 +144,9 @@ app.MapPost("/api/logging", (LoggingRequest request, SimulatorCoordinator coordi
 //   "energyWhImport": 256937,       // Energy.Active.Import.Register in Wh
 //   "powerKwImport": 3.45,          // Power.Active.Import in kW
 //   "frequencyHz": 50.01,           // Frequency in Hz
-//   "powerKwOffered": 3.45,         // Power.Offered in kW
-//   "currentAmpsOffered": 15.0,     // Current.Offered in A
+//   "powerKwOffered": 3.45,         // Power.Offered in kW (optional — calculated from currentAmpsOffered if omitted)
+//   "currentAmpsImport": 15.0,      // Current.Import — actual draw in A
+//   "currentAmpsOffered": 15.0,     // Current.Offered in A (optional — uses chargingALimitConn1 if omitted)
 //   "stateOfChargePercent": 42.0    // SoC in % (optional)
 // }
 // All fields are optional — omit any you don't have and the simulator will
