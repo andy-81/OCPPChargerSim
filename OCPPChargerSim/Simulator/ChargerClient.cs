@@ -1313,17 +1313,34 @@ public sealed class ChargerClient
 
         _meterValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
 
+        var stopTimestamp = DateTimeOffset.UtcNow.ToString("O");
+
         var payload = new Dictionary<string, object>
         {
             ["transactionId"] = _activeTransactionId.Value,
             ["meterStop"] = _meterValue,
-            ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["timestamp"] = stopTimestamp,
             ["reason"] = reason,
         };
 
         if (!string.IsNullOrEmpty(_activeIdTag))
         {
             payload["idTag"] = _activeIdTag!;
+        }
+
+        var stopTxnMeasurands = GetStopTxnMeasurands();
+        if (stopTxnMeasurands.Count > 0)
+        {
+            var sample = ApplyExternalValues(LatestSample);
+            var sampledValues = BuildSampledValues(stopTxnMeasurands, sample, "Transaction.End");
+            payload["transactionData"] = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["timestamp"] = stopTimestamp,
+                    ["sampledValue"] = sampledValues,
+                },
+            };
         }
 
         await SendCallAsync(uniqueId, "StopTransaction", payload, cancellationToken).ConfigureAwait(false);
@@ -1812,6 +1829,21 @@ public sealed class ChargerClient
         }
 
         return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register", "Power.Active.Import" });
+    }
+
+    private List<string> GetStopTxnMeasurands()
+    {
+        string? configured;
+        lock (_configuration)
+        {
+            _configuration.TryGetValue("StopTxnSampledData", out configured);
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                _configuration.TryGetValue("MeterValuesSampledData", out configured);
+            }
+        }
+
+        return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register" });
     }
 
     /// <summary>
