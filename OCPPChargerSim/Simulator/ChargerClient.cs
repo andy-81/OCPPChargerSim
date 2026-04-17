@@ -1307,9 +1307,9 @@ public sealed class ChargerClient
 
             await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
 
-            TransitionVehicleState("Available", StateInitiator.Remote);
+            TransitionVehicleState("SuspendedEV", StateInitiator.Remote);
             _logger.Info($"Vehicle state updated to: {_vehicle.State}");
-            await SendStatusNotificationAsync("Available", cancellationToken).ConfigureAwait(false);
+            await SendStatusNotificationAsync("SuspendedEV", cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
