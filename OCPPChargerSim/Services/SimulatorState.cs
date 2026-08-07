@@ -254,6 +254,7 @@ public sealed class SimulatorState
                 PowerKwImport = _externalMeterValues.PowerKwImport,
                 FrequencyHz = _externalMeterValues.FrequencyHz,
                 PowerKwOffered = _externalMeterValues.PowerKwOffered,
+                CurrentAmpsImport = _externalMeterValues.CurrentAmpsImport,
                 CurrentAmpsOffered = _externalMeterValues.CurrentAmpsOffered,
                 StateOfChargePercent = _externalMeterValues.StateOfChargePercent,
             };

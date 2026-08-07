@@ -1247,11 +1247,9 @@ public sealed class ChargerClient
                     ["status"] = "Accepted",
                 }, cancellationToken).ConfigureAwait(false);
 
-                TransitionVehicleState("Finishing", StateInitiator.Remote);
-                await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
-                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
-                TransitionVehicleState("SuspendedEV", StateInitiator.Remote);
-                await SendStatusNotificationAsync("SuspendedEV", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                // Run the manual-simulation wind-down in the background so the
+                // receive loop is free to process subsequent CSMS messages.
+                _ = Task.Run(() => RunRemoteStopManualSequenceAsync(cancellationToken), CancellationToken.None);
                 return;
             }
 
@@ -1282,21 +1280,68 @@ public sealed class ChargerClient
             ["status"] = "Accepted",
         }, cancellationToken).ConfigureAwait(false);
 
-        TransitionVehicleState("Finishing", StateInitiator.Remote);
-        await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
+        // Detach the stop sequence from the receive loop. The receive loop must
+        // remain free to read and dispatch incoming messages — in particular the
+        // CSMS's response (or error) to the StopTransaction we are about to send.
+        // Awaiting SendStopTransactionAsync here would deadlock: the CSMS reply
+        // sits in the WebSocket buffer, but the receive loop can't read it while
+        // it is blocked inside this handler.
+        _ = Task.Run(() => RunRemoteStopSequenceAsync(cancellationToken), CancellationToken.None);
+    }
 
-        StopMeterValueLoop();
+    /// <summary>
+    /// Runs the post-stop state sequence for a real OCPP transaction remote stop.
+    /// Executes in a background task so the receive loop remains unblocked.
+    /// </summary>
+    private async Task RunRemoteStopSequenceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            TransitionVehicleState("Finishing", StateInitiator.Remote);
+            _logger.Info($"Vehicle state updated to: {_vehicle.State}");
+            await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
 
-        var stopTask = SendStopTransactionAsync("Remote", cancellationToken);
+            StopMeterValueLoop();
 
-        await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
+            await SendStopTransactionAsync("Remote", cancellationToken).ConfigureAwait(false);
 
-        TransitionVehicleState("SuspendedEV", StateInitiator.Remote);
-        _logger.Info($"Vehicle state updated to: {_vehicle.State}");
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
 
-        await SendStatusNotificationAsync("SuspendedEV", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            TransitionVehicleState("SuspendedEV", StateInitiator.Remote);
+            _logger.Info($"Vehicle state updated to: {_vehicle.State}");
+            await SendStatusNotificationAsync("SuspendedEV", cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Error in remote stop sequence");
+        }
+    }
 
-        await stopTask.ConfigureAwait(false);
+    /// <summary>
+    /// Runs the wind-down state sequence when a RemoteStopTransaction arrives
+    /// while only a manual simulation (no real OCPP transaction) is active.
+    /// Executes in a background task so the receive loop remains unblocked.
+    /// </summary>
+    private async Task RunRemoteStopManualSequenceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            TransitionVehicleState("Finishing", StateInitiator.Remote);
+            await SendStatusNotificationAsync("Finishing", cancellationToken, TimeSpan.FromSeconds(5), waitForResponse: false).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
+            TransitionVehicleState("Available", StateInitiator.Remote);
+            await SendStatusNotificationAsync("Available", cancellationToken, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Error in remote stop manual sequence");
+        }
     }
 
     private async Task<bool> SendStopTransactionAsync(string reason, CancellationToken cancellationToken)
@@ -1313,17 +1358,34 @@ public sealed class ChargerClient
 
         _meterValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
 
+        var stopTimestamp = DateTimeOffset.UtcNow.ToString("O");
+
         var payload = new Dictionary<string, object>
         {
             ["transactionId"] = _activeTransactionId.Value,
             ["meterStop"] = _meterValue,
-            ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["timestamp"] = stopTimestamp,
             ["reason"] = reason,
         };
 
         if (!string.IsNullOrEmpty(_activeIdTag))
         {
             payload["idTag"] = _activeIdTag!;
+        }
+
+        var stopTxnMeasurands = GetStopTxnMeasurands();
+        if (stopTxnMeasurands.Count > 0)
+        {
+            var sample = ApplyExternalValues(LatestSample);
+            var sampledValues = BuildSampledValues(stopTxnMeasurands, sample, "Transaction.End");
+            payload["transactionData"] = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["timestamp"] = stopTimestamp,
+                    ["sampledValue"] = sampledValues,
+                },
+            };
         }
 
         await SendCallAsync(uniqueId, "StopTransaction", payload, cancellationToken).ConfigureAwait(false);
@@ -1814,6 +1876,21 @@ public sealed class ChargerClient
         return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register", "Power.Active.Import" });
     }
 
+    private List<string> GetStopTxnMeasurands()
+    {
+        string? configured;
+        lock (_configuration)
+        {
+            _configuration.TryGetValue("StopTxnSampledData", out configured);
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                _configuration.TryGetValue("MeterValuesSampledData", out configured);
+            }
+        }
+
+        return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register" });
+    }
+
     /// <summary>
     /// Returns the list of measurands from MeterValuesAlignedData config.
     /// </summary>
@@ -1913,16 +1990,20 @@ public sealed class ChargerClient
                 (ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
             "CURRENT.IMPORT" => MeasurandEntry(measurand,
-                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+                (ext?.CurrentAmpsImport ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "CURRENT.OFFERED" => MeasurandEntry(measurand,
-                (ext?.CurrentAmpsOffered ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
+                (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "POWER.OFFERED" => MeasurandEntry(measurand,
-                (ext?.PowerKwOffered ?? ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+                (ext?.PowerKwOffered ?? (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps) * NominalVoltage / 1000.0).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
 
+            // Frequency unit "Hertz" is not accepted by many CSMS implementations
+            // (including Octopus) when it appears in StopTransaction.transactionData,
+            // even though it is valid in periodic MeterValues messages.
+            "FREQUENCY" when context == "Transaction.End" => null,
             "FREQUENCY" => MeasurandEntry(measurand,
-                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hz", context),
+                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hertz", context),
 
             "SOC" when _supportSoC || (ext?.StateOfChargePercent.HasValue == true) => MeasurandEntry(measurand,
                 (ext?.StateOfChargePercent ?? (_supportSoC && sample.StateOfCharge >= 0 ? sample.StateOfCharge : 0)).ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
