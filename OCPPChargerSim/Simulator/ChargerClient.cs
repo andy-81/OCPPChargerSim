@@ -23,6 +23,9 @@ public sealed class ChargerClient
         ["MeterValueSampleInterval"] = "15",
         ["MeterValuesSampledData"] = "Energy.Active.Import.Register,Power.Active.Import",
         ["MeterValuesAlignedData"] = "",
+        // Empty on purpose: real chargers leave StopTransaction.transactionData empty and
+        // let meterStart/meterStop carry the session's energy.
+        ["StopTxnSampledData"] = "",
         ["ClockAlignedDataInterval"] = "0",
         ["minSoC"] = "20",
         ["maxSoC"] = "100",
@@ -450,6 +453,13 @@ public sealed class ChargerClient
             var response = await tcs.Task.ConfigureAwait(false);
             if (TryGetString(response, "status", out var status) && string.Equals(status, "Accepted", StringComparison.OrdinalIgnoreCase))
             {
+                // The CSMS dictates the heartbeat cadence in its BootNotification response.
+                // Octopus asks for 10s; ignoring it leaves the charger looking stale between beats.
+                if (TryGetInt32(response, "interval", out var bootInterval) && bootInterval > 0)
+                {
+                    SetLocalConfiguration("HeartbeatInterval", bootInterval.ToString(CultureInfo.InvariantCulture));
+                }
+
                 if (sendStatusOnSuccess)
                 {
                     var reportedState = string.IsNullOrWhiteSpace(_vehicle.State) ? "Available" : _vehicle.State;
@@ -670,6 +680,9 @@ public sealed class ChargerClient
         var uniqueId = GenerateUniqueId();
         var tcs = RegisterCall(uniqueId);
 
+        // Latch the opening read from the same register the MeterValues will report, so
+        // the CSMS sees a continuous series from meterStart through to meterStop.
+        SyncMeterAccumulatorFromExternal();
         _meterStartValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
         _meterValue = _meterStartValue;
         _lastMeterSampleTimestamp = DateTimeOffset.UtcNow;
@@ -1004,38 +1017,8 @@ public sealed class ChargerClient
         var tcs = RegisterCall(uniqueId);
 
         var now = DateTimeOffset.UtcNow;
-        double elapsedSeconds;
-        if (_lastMeterSampleTimestamp == DateTimeOffset.MinValue)
-        {
-            elapsedSeconds = GetMeterSampleInterval().TotalSeconds;
-            if (elapsedSeconds <= 0)
-            {
-                elapsedSeconds = 1.0;
-            }
-        }
-        else
-        {
-            elapsedSeconds = (now - _lastMeterSampleTimestamp).TotalSeconds;
-            if (elapsedSeconds <= 0)
-            {
-                elapsedSeconds = 1.0;
-            }
-        }
-
-        _lastMeterSampleTimestamp = now;
-
-        var jitter = (_random.NextDouble() - 0.5) * CurrentJitterAmps;
-        var currentAmps = Math.Clamp(TargetCurrentAmps + jitter, 10.0, MaxCurrentAmps);
-        if (GetConfiguredCurrentLimit() is double configuredLimit)
-        {
-            currentAmps = Math.Min(currentAmps, configuredLimit);
-        }
-        var powerKwValue = Math.Min(currentAmps * NominalVoltage / 1000.0, MaxPowerKw);
-
-        var incrementWh = powerKwValue * elapsedSeconds / 3.6;
-        _meterAccumulatorWh += incrementWh;
-        _meterValue = (int)Math.Round(_meterAccumulatorWh);
-        var energyWhValue = Math.Round(_meterAccumulatorWh, 0, MidpointRounding.AwayFromZero);
+        var (currentAmps, powerKwValue) = ComputeSimulatedLoad();
+        AccrueSimulatedEnergy(powerKwValue, now);
 
         var sample = new MeterSample(_meterAccumulatorWh, powerKwValue, currentAmps, _supportSoC ? FixedStateOfCharge : -1, now);
 
@@ -1077,6 +1060,65 @@ public sealed class ChargerClient
 
         PublishSample(sample);
         PersistMeterAccumulator();
+    }
+
+    /// <summary>
+    /// Returns the simulated draw for this instant, honouring any CSMS-imposed current limit.
+    /// </summary>
+    private (double CurrentAmps, double PowerKw) ComputeSimulatedLoad()
+    {
+        var jitter = (_random.NextDouble() - 0.5) * CurrentJitterAmps;
+        var currentAmps = Math.Clamp(TargetCurrentAmps + jitter, 10.0, MaxCurrentAmps);
+        if (GetConfiguredCurrentLimit() is double configuredLimit)
+        {
+            currentAmps = Math.Min(currentAmps, configuredLimit);
+        }
+
+        return (currentAmps, Math.Min(currentAmps * NominalVoltage / 1000.0, MaxPowerKw));
+    }
+
+    /// <summary>
+    /// Advances the meter register by the energy drawn since the previous sample and
+    /// moves the sample watermark to <paramref name="now"/>.
+    ///
+    /// Every reading the CSMS sees — periodic MeterValues, meterStart and meterStop —
+    /// is taken from the same accumulator, so the closing read can never fall behind
+    /// the last value that was reported mid-transaction.
+    /// </summary>
+    private void AccrueSimulatedEnergy(double powerKw, DateTimeOffset now)
+    {
+        double elapsedSeconds;
+        if (_lastMeterSampleTimestamp == DateTimeOffset.MinValue)
+        {
+            elapsedSeconds = GetMeterSampleInterval().TotalSeconds;
+        }
+        else
+        {
+            elapsedSeconds = (now - _lastMeterSampleTimestamp).TotalSeconds;
+        }
+
+        if (elapsedSeconds <= 0)
+        {
+            elapsedSeconds = 1.0;
+        }
+
+        _lastMeterSampleTimestamp = now;
+        _meterAccumulatorWh += powerKw * elapsedSeconds / 3.6;
+        _meterValue = (int)Math.Round(_meterAccumulatorWh);
+    }
+
+    /// <summary>
+    /// Pulls the register up to the latest externally supplied reading (Home Assistant)
+    /// when one is available, so meterStart and meterStop are latched from the same
+    /// source as the MeterValues in between.
+    /// </summary>
+    private void SyncMeterAccumulatorFromExternal()
+    {
+        if (_externalMeterValuesProvider?.Invoke()?.EnergyWhImport is double energyWh)
+        {
+            _meterAccumulatorWh = energyWh;
+            _meterValue = (int)Math.Round(_meterAccumulatorWh);
+        }
     }
 
     public async Task SendHeartbeatAsync(CancellationToken cancellationToken, bool ignoreDisabled = false)
@@ -1356,9 +1398,25 @@ public sealed class ChargerClient
         var uniqueId = GenerateUniqueId();
         var tcs = RegisterCall(uniqueId);
 
-        _meterValue = (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero);
+        // Bring the register right up to the moment of the stop. The meter loop was already
+        // cancelled by the caller, so without this the closing read would be whatever the
+        // last periodic sample happened to be — up to a full MeterValueSampleInterval of
+        // energy short, and identical to meterStart for any transaction stopped before the
+        // first sample fired. That is what makes the CSMS report a zero-energy session.
+        // Only bill the tail if the connector was genuinely drawing at the last sample; a
+        // transaction that sat in SuspendedEV throughout must still close with
+        // meterStop == meterStart, exactly as a real charger reports it.
+        var stopMoment = DateTimeOffset.UtcNow;
+        AccrueSimulatedEnergy(LatestSample.PowerKw > 0 ? ComputeSimulatedLoad().PowerKw : 0, stopMoment);
+        SyncMeterAccumulatorFromExternal();
 
-        var stopTimestamp = DateTimeOffset.UtcNow.ToString("O");
+        // A meter register never runs backwards; never let a stale or reset external
+        // reading push meterStop below meterStart and turn the session negative.
+        _meterValue = Math.Max(
+            (int)Math.Round(_meterAccumulatorWh, MidpointRounding.AwayFromZero),
+            _meterStartValue);
+
+        var stopTimestamp = stopMoment.ToString("O");
 
         var payload = new Dictionary<string, object>
         {
@@ -1387,6 +1445,10 @@ public sealed class ChargerClient
                 },
             };
         }
+        else
+        {
+            payload["transactionData"] = Array.Empty<object>();
+        }
 
         await SendCallAsync(uniqueId, "StopTransaction", payload, cancellationToken).ConfigureAwait(false);
 
@@ -1411,6 +1473,10 @@ public sealed class ChargerClient
         finally
         {
             _pendingCalls.TryRemove(uniqueId, out _);
+
+            // Carry the reported meterStop forward as the register's new floor so the next
+            // transaction opens where this one closed.
+            _meterAccumulatorWh = Math.Max(_meterAccumulatorWh, _meterValue);
             PublishSample(new MeterSample(_meterAccumulatorWh, 0, 0, _supportSoC ? FixedStateOfCharge : -1, DateTimeOffset.UtcNow));
             PersistMeterAccumulator();
             _activeTransactionId = null;
@@ -1622,9 +1688,17 @@ public sealed class ChargerClient
         var errorCode = message[2].GetString() ?? string.Empty;
         var errorDescription = message[3].GetString() ?? string.Empty;
 
+        // Surface rejections loudly. A CSMS that refuses a MeterValues or StopTransaction
+        // simply drops the meter read it carried, and the only outward symptom is a session
+        // that reports no energy — so this must never be swallowed.
+        _logger.Error($"CSMS rejected call {uniqueId} with {errorCode}: {errorDescription} — details {message[4]}");
+
         if (_pendingCalls.TryRemove(uniqueId, out var tcs) && !tcs.Task.IsCompleted)
         {
             tcs.TrySetException(new InvalidOperationException($"{errorCode}: {errorDescription}"));
+            // Nothing awaits the faulted task on most call sites; observe it so the
+            // exception doesn't resurface as an unobserved-task crash.
+            _ = tcs.Task.ContinueWith(static t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
         }
     }
 
@@ -1876,19 +1950,25 @@ public sealed class ChargerClient
         return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register", "Power.Active.Import" });
     }
 
+    /// <summary>
+    /// Measurands to embed in StopTransaction.transactionData, driven solely by
+    /// StopTxnSampledData (empty by default).
+    ///
+    /// This deliberately does NOT fall back to MeterValuesSampledData. Octopus sets that
+    /// key to a nine-measurand list, and replaying all nine as Transaction.End samples was
+    /// enough for the CSMS to reject the StopTransaction outright — taking the closing
+    /// meter read down with it. Real chargers send an empty transactionData and let
+    /// meterStart/meterStop carry the reading.
+    /// </summary>
     private List<string> GetStopTxnMeasurands()
     {
         string? configured;
         lock (_configuration)
         {
             _configuration.TryGetValue("StopTxnSampledData", out configured);
-            if (string.IsNullOrWhiteSpace(configured))
-            {
-                _configuration.TryGetValue("MeterValuesSampledData", out configured);
-            }
         }
 
-        return ParseMeasurandList(configured, new[] { "Energy.Active.Import.Register" });
+        return ParseMeasurandList(configured, Array.Empty<string>());
     }
 
     /// <summary>
@@ -1981,13 +2061,20 @@ public sealed class ChargerClient
     {
         // Map each measurand to its value and unit.
         // External (Home Assistant) values take priority where available.
+        // Units must come from the OCPP 1.6 UnitOfMeasure enum
+        // (Wh, kWh, varh, kvarh, W, kW, VA, kVA, var, kvar, A, V, K, Celcius, Fahrenheit, Percent).
+        // Anything outside that list makes a strict CSMS reject the whole message with
+        // FormatViolation, which silently discards the meter reads it carries.
+        //
+        // Power is reported in W (not kW) to match what real chargers put on the wire —
+        // Octopus reads the raw number and a kW figure is interpreted as ~0 W.
         return measurand.ToUpperInvariant() switch
         {
             "ENERGY.ACTIVE.IMPORT.REGISTER" => MeasurandEntry(measurand,
-                (ext?.EnergyWhImport ?? sample.EnergyWh).ToString("0", CultureInfo.InvariantCulture), "Wh", context),
+                (ext?.EnergyWhImport ?? sample.EnergyWh).ToString("0.0", CultureInfo.InvariantCulture), "Wh", context),
 
             "POWER.ACTIVE.IMPORT" => MeasurandEntry(measurand,
-                (ext?.PowerKwImport ?? sample.PowerKw).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+                ((ext?.PowerKwImport ?? sample.PowerKw) * 1000.0).ToString("0.0", CultureInfo.InvariantCulture), "W", context),
 
             "CURRENT.IMPORT" => MeasurandEntry(measurand,
                 (ext?.CurrentAmpsImport ?? sample.CurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
@@ -1996,23 +2083,24 @@ public sealed class ChargerClient
                 (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps).ToString("0.0", CultureInfo.InvariantCulture), "A", context),
 
             "POWER.OFFERED" => MeasurandEntry(measurand,
-                (ext?.PowerKwOffered ?? (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps) * NominalVoltage / 1000.0).ToString("0.0", CultureInfo.InvariantCulture), "kW", context),
+                ((ext?.PowerKwOffered ?? (ext?.CurrentAmpsOffered ?? GetConfiguredCurrentLimit() ?? MaxCurrentAmps) * NominalVoltage / 1000.0) * 1000.0).ToString("0.0", CultureInfo.InvariantCulture), "W", context),
 
-            // Frequency unit "Hertz" is not accepted by many CSMS implementations
-            // (including Octopus) when it appears in StopTransaction.transactionData,
-            // even though it is valid in periodic MeterValues messages.
-            "FREQUENCY" when context == "Transaction.End" => null,
+            // "Hertz" is not a valid OCPP 1.6 UnitOfMeasure. Real chargers send Frequency
+            // with no unit at all, so omit it rather than guessing a substitute.
             "FREQUENCY" => MeasurandEntry(measurand,
-                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), "Hertz", context),
+                (ext?.FrequencyHz ?? GridFrequencyHz).ToString("0.0", CultureInfo.InvariantCulture), null, context),
 
-            "SOC" when _supportSoC || (ext?.StateOfChargePercent.HasValue == true) => MeasurandEntry(measurand,
-                (ext?.StateOfChargePercent ?? (_supportSoC && sample.StateOfCharge >= 0 ? sample.StateOfCharge : 0)).ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
-
-            "SOC" => MeasurandEntry(measurand, "0.0", "Percent", context),
+            // Only report SoC when a value actually exists. A hard-coded 0% reads as an
+            // empty battery to the CSMS and skews its charge planning.
+            "SOC" when ext?.StateOfChargePercent is double externalSoC => MeasurandEntry(measurand,
+                externalSoC.ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
+            "SOC" when _supportSoC && sample.StateOfCharge >= 0 => MeasurandEntry(measurand,
+                sample.StateOfCharge.ToString("0.0", CultureInfo.InvariantCulture), "Percent", context),
+            "SOC" => null,
 
             // V2G / export measurands — not supported, always 0
             "ENERGY.ACTIVE.EXPORT.REGISTER" => MeasurandEntry(measurand, "0", "Wh", context),
-            "POWER.ACTIVE.EXPORT" => MeasurandEntry(measurand, "0.0", "kW", context),
+            "POWER.ACTIVE.EXPORT" => MeasurandEntry(measurand, "0.0", "W", context),
             "CURRENT.EXPORT" => MeasurandEntry(measurand, "0.0", "A", context),
 
             "VOLTAGE" => MeasurandEntry(measurand, NominalVoltage.ToString("0.0", CultureInfo.InvariantCulture), "V", context),
@@ -2022,15 +2110,21 @@ public sealed class ChargerClient
         };
     }
 
-    private static Dictionary<string, object> MeasurandEntry(string measurand, string value, string unit, string context)
+    private static Dictionary<string, object> MeasurandEntry(string measurand, string value, string? unit, string context)
     {
-        return new Dictionary<string, object>
+        var entry = new Dictionary<string, object>
         {
             ["value"] = value,
             ["measurand"] = measurand,
-            ["unit"] = unit,
             ["context"] = context,
         };
+
+        if (unit is not null)
+        {
+            entry["unit"] = unit;
+        }
+
+        return entry;
     }
 
     private static bool TryGetString(JsonElement element, string propertyName, out string value)
